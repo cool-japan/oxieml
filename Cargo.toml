@@ -1,0 +1,40 @@
+[package]
+name = "oxieml"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+description = "EML operator: all elementary functions from exp(x) - ln(y)"
+repository = "https://github.com/cool-japan/oxieml"
+license = "Apache-2.0"
+authors = ["COOLJAPAN OU (Team KitaSan)"]
+keywords = ["symbolic-regression", "elementary-functions", "eml", "mathematics"]
+categories = ["mathematics", "science"]
+documentation = "https://docs.rs/oxieml"
+homepage = "https://github.com/cool-japan/oxieml"
+readme = "README.md"
+
+[dependencies]
+num-complex = "0.4"
+rand = "0.10"
+rayon = { version = "1.12", optional = true }
+oxiblas-core = { version = "0.2.1", optional = true, default-features = false, features = ["std"] }
+oxiz = { version = "0.2", optional = true, default-features = false, features = ["std"] }
+num-rational = { version = "0.4", optional = true }
+
+[dev-dependencies]
+criterion = "0.8"
+approx = "0.5"
+
+[features]
+default = []
+smt = ["dep:oxiz", "dep:num-rational"]
+simd = ["dep:oxiblas-core"]
+parallel = ["dep:rayon"]
+
+[[bin]]
+name = "oxieml"
+path = "src/bin/oxieml.rs"
+
+[[bench]]
+name = "eval_bench"
+harness = false
