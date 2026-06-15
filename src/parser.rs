@@ -123,10 +123,9 @@ impl<'a> Parser<'a> {
 
         let ch = self.bytes[self.pos];
 
-        // "1" → One
-        if ch == b'1' {
-            self.pos += 1;
-            return Ok(Arc::new(EmlNode::One));
+        // Numeric literal: "1" alone → EmlNode::One (back-compat); other numbers → EmlNode::Const
+        if ch.is_ascii_digit() {
+            return self.parse_numeric_literal();
         }
 
         // "x" followed by digits → Var
@@ -167,6 +166,33 @@ impl<'a> Parser<'a> {
             position: self.pos,
             message: format!("unexpected character '{}'", ch as char),
         })
+    }
+
+    fn parse_numeric_literal(&mut self) -> Result<Arc<EmlNode>, ParseError> {
+        let start = self.pos;
+        // Consume integer digits
+        while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+            self.pos += 1;
+        }
+        // Check for decimal point
+        let has_dot = self.pos < self.bytes.len() && self.bytes[self.pos] == b'.';
+        if has_dot {
+            self.pos += 1;
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+        }
+        let token = &self.input[start..self.pos];
+        // "1" (no dot) → backward-compatible EmlNode::One
+        if token == "1" {
+            return Ok(Arc::new(EmlNode::One));
+        }
+        // All other numeric literals → EmlNode::Const(v)
+        let v: f64 = token.parse().map_err(|_| ParseError {
+            position: start,
+            message: format!("invalid numeric literal '{token}'"),
+        })?;
+        Ok(Arc::new(EmlNode::Const(v)))
     }
 
     fn parse_eml_body(&mut self) -> Result<Arc<EmlNode>, ParseError> {
@@ -215,6 +241,7 @@ pub fn to_compact_string(tree: &EmlTree) -> String {
 
 fn node_to_compact(node: &EmlNode) -> String {
     match node {
+        EmlNode::Const(v) => format!("{v:.6}"),
         EmlNode::One => "1".to_string(),
         EmlNode::Var(i) => format!("x{i}"),
         EmlNode::Eml { left, right } => {
@@ -323,5 +350,24 @@ mod tests {
     #[test]
     fn test_parse_error_unmatched() {
         assert!(parse("E(1, 1").is_err());
+    }
+
+    #[test]
+    fn test_parse_float_literal() {
+        // Use 3.75 to avoid clippy::approx_constant (3.14 ≈ π).
+        let tree = parse("3.75").expect("parse of float literal should succeed");
+        assert!(matches!(tree.root.as_ref(), EmlNode::Const(v) if (*v - 3.75).abs() < 1e-10));
+    }
+
+    #[test]
+    fn test_parse_integer_not_one() {
+        let tree = parse("2").expect("parse of '2' should succeed");
+        assert!(matches!(tree.root.as_ref(), EmlNode::Const(v) if (*v - 2.0).abs() < 1e-15));
+    }
+
+    #[test]
+    fn test_parse_one_stays_one() {
+        let tree = parse("1").expect("parse of '1' should still give One");
+        assert!(matches!(tree.root.as_ref(), EmlNode::One));
     }
 }

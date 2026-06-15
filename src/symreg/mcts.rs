@@ -43,6 +43,8 @@ enum PartialNode {
     One,
     /// Input variable `x_i` (corresponds to `EmlNode::Var(i)`).
     Var(usize),
+    /// Free constant leaf (activated by `SymRegConfig.enable_const_leaf`).
+    Const(f64),
     /// `eml(left, right) = exp(left) − ln(right)`.
     Eml(Box<PartialNode>, Box<PartialNode>),
 }
@@ -52,7 +54,7 @@ impl PartialNode {
     fn hole_count(&self) -> usize {
         match self {
             PartialNode::Hole => 1,
-            PartialNode::One | PartialNode::Var(_) => 0,
+            PartialNode::One | PartialNode::Var(_) | PartialNode::Const(_) => 0,
             PartialNode::Eml(l, r) => l.hole_count() + r.hole_count(),
         }
     }
@@ -66,13 +68,14 @@ impl PartialNode {
                 *self = match action {
                     MctsAction::One => PartialNode::One,
                     MctsAction::Var(i) => PartialNode::Var(*i),
+                    MctsAction::FreeConst(v) => PartialNode::Const(*v),
                     MctsAction::Expand => {
                         PartialNode::Eml(Box::new(PartialNode::Hole), Box::new(PartialNode::Hole))
                     }
                 };
                 true
             }
-            PartialNode::One | PartialNode::Var(_) => false,
+            PartialNode::One | PartialNode::Var(_) | PartialNode::Const(_) => false,
             PartialNode::Eml(l, r) => {
                 if l.expand_leftmost(action) {
                     true
@@ -97,7 +100,7 @@ impl PartialNode {
                     PartialNode::Var(idx - 1)
                 };
             }
-            PartialNode::One | PartialNode::Var(_) => {}
+            PartialNode::One | PartialNode::Var(_) | PartialNode::Const(_) => {}
             PartialNode::Eml(l, r) => {
                 l.complete_random(num_vars, rng);
                 r.complete_random(num_vars, rng);
@@ -118,6 +121,7 @@ impl PartialNode {
             }
             PartialNode::One => Arc::new(EmlNode::One),
             PartialNode::Var(i) => Arc::new(EmlNode::Var(*i)),
+            PartialNode::Const(v) => Arc::new(EmlNode::Const(*v)),
             PartialNode::Eml(l, r) => Arc::new(EmlNode::Eml {
                 left: l.to_eml_node(),
                 right: r.to_eml_node(),
@@ -133,6 +137,8 @@ enum MctsAction {
     One,
     /// Replace the HOLE with input variable `x_i`.
     Var(usize),
+    /// Replace the HOLE with a free constant leaf `Const(v)`.
+    FreeConst(f64),
     /// Replace the HOLE with `eml(HOLE, HOLE)` — adds two new HOLEs.
     Expand,
 }
@@ -141,11 +147,20 @@ enum MctsAction {
 ///
 /// If `hole_depth >= max_depth`, only terminal actions (One, Var) are legal —
 /// adding an Eml node would push children to depth `hole_depth + 1 > max_depth`.
-fn legal_actions(hole_depth: usize, max_depth: usize, num_vars: usize) -> Vec<MctsAction> {
-    let mut actions = Vec::with_capacity(1 + num_vars + 1);
+fn legal_actions(
+    hole_depth: usize,
+    max_depth: usize,
+    num_vars: usize,
+    enable_const: bool,
+    const_init: f64,
+) -> Vec<MctsAction> {
+    let mut actions = Vec::with_capacity(2 + num_vars + usize::from(enable_const));
     actions.push(MctsAction::One);
     for i in 0..num_vars {
         actions.push(MctsAction::Var(i));
+    }
+    if enable_const {
+        actions.push(MctsAction::FreeConst(const_init));
     }
     if hole_depth < max_depth {
         actions.push(MctsAction::Expand);
@@ -157,7 +172,7 @@ fn legal_actions(hole_depth: usize, max_depth: usize, num_vars: usize) -> Vec<Mc
 fn leftmost_hole_depth(node: &PartialNode, current: usize) -> Option<usize> {
     match node {
         PartialNode::Hole => Some(current),
-        PartialNode::One | PartialNode::Var(_) => None,
+        PartialNode::One | PartialNode::Var(_) | PartialNode::Const(_) => None,
         PartialNode::Eml(l, r) => {
             leftmost_hole_depth(l, current + 1).or_else(|| leftmost_hole_depth(r, current + 1))
         }
@@ -248,7 +263,7 @@ pub(crate) fn run_mcts(
         return Ok(vec![]);
     }
 
-    let config = engine.config();
+    let config = &engine.config;
     let max_depth = config.max_depth;
 
     // Surrogate engine: cheap Adam for rollout simulation.
@@ -355,7 +370,13 @@ pub(crate) fn run_mcts(
                 let (hole_depth, actions) = {
                     let node = &arena[node_idx];
                     let hd = node.leftmost_hole_depth.unwrap_or(0);
-                    let acts = legal_actions(hd, max_depth, num_vars);
+                    let acts = legal_actions(
+                        hd,
+                        max_depth,
+                        num_vars,
+                        config.enable_const_leaf,
+                        config.const_leaf_init,
+                    );
                     (hd, acts)
                 };
                 let _ = hole_depth; // captured inside legal_actions call
@@ -397,17 +418,51 @@ pub(crate) fn run_mcts(
 
             let tree = partial_to_tree(&rollout_partial);
 
-            // Interval pruning: skip infeasible topologies.
-            let feasible = if let Some((ref ivs, tlo, thi)) = interval_data {
-                let threshold = config.interval_pruning_depth_threshold;
-                if tree.depth() < threshold {
-                    true
-                } else {
-                    topology_interval_feasible(&tree, ivs, tlo, thi)
-                }
+            // Units pre-filter (gated on Some(unit_filter)).
+            let units_feasible = if let Some((ref var_units, target_units)) = config.unit_filter {
+                let lowered = tree.lower().simplify();
+                matches!(lowered.check_units(var_units), Ok(u) if u == target_units)
             } else {
                 true
             };
+
+            // Interval pruning: skip infeasible topologies.
+            let feasible = units_feasible
+                && if let Some((ref ivs, tlo, thi)) = interval_data {
+                    let threshold = config.interval_pruning_depth_threshold;
+                    if tree.depth() < threshold {
+                        true
+                    } else if !topology_interval_feasible(&tree, ivs, tlo, thi) {
+                        false
+                    } else {
+                        #[cfg(feature = "smt")]
+                        let smt_feasible = {
+                            use crate::smt::Interval;
+                            let smt_vars: Vec<Interval> =
+                                ivs.iter().map(|iv| Interval::new(iv.lo, iv.hi)).collect();
+                            let constraint = crate::smt::EmlConstraint::GeZero(tree.clone());
+                            if config.smt_prune_solver {
+                                let depth = tree.depth();
+                                let min_d = config.interval_pruning_depth_threshold;
+                                !super::smt_prune::solver_prune(
+                                    &constraint,
+                                    &smt_vars,
+                                    min_d,
+                                    depth,
+                                )
+                            } else if config.smt_prune {
+                                !super::smt_prune::interval_prune(&constraint, &smt_vars)
+                            } else {
+                                true
+                            }
+                        };
+                        #[cfg(not(feature = "smt"))]
+                        let smt_feasible = true;
+                        smt_feasible
+                    }
+                } else {
+                    true
+                };
 
             if !feasible {
                 // Assign a very low reward for pruned topologies; discard tree.
@@ -415,7 +470,7 @@ pub(crate) fn run_mcts(
             } else {
                 // Quick Adam fit — keep the tree AND the reward.
                 let formula =
-                    surrogate_engine.optimize_topology_pub(&tree, inputs, targets, expanded_idx);
+                    surrogate_engine.optimize_topology(&tree, inputs, targets, expanded_idx);
                 match formula {
                     Some(f) => {
                         let r = 1.0 / (1.0 + f.mse);
@@ -505,7 +560,7 @@ pub(crate) fn run_mcts(
     }
 
     // Full Adam optimization on the top candidates.
-    engine.optimize_and_finalize_pub(unique_candidates, inputs, targets)
+    engine.optimize_and_finalize(unique_candidates, inputs, targets)
 }
 
 /// Create an RNG for MCTS rollouts with a distinct salt from topology seeds.

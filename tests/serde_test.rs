@@ -2,6 +2,7 @@
 mod serde_tests {
     use oxieml::eval::EvalCtx;
     use oxieml::{DiscoveredFormula, EmlTree, LoweredOp, NamedConst};
+    use std::sync::Arc;
 
     #[test]
     fn emltree_json_round_trip() {
@@ -48,8 +49,8 @@ mod serde_tests {
     #[test]
     fn lowered_op_json_round_trip() {
         let op = LoweredOp::Add(
-            Box::new(LoweredOp::Var(0)),
-            Box::new(LoweredOp::Const(std::f64::consts::PI)),
+            Arc::new(LoweredOp::Var(0)),
+            Arc::new(LoweredOp::Const(std::f64::consts::PI)),
         );
         let json = serde_json::to_string(&op).expect("serialize");
         let back: LoweredOp = serde_json::from_str(&json).expect("deserialize");
@@ -75,26 +76,26 @@ mod serde_tests {
             LoweredOp::Const(1.0),
             LoweredOp::Var(0),
             LoweredOp::NamedConst(NamedConst::Pi),
-            LoweredOp::Sin(Box::new(LoweredOp::Var(0))),
-            LoweredOp::Cos(Box::new(LoweredOp::Var(0))),
-            LoweredOp::Tan(Box::new(LoweredOp::Var(0))),
-            LoweredOp::Sinh(Box::new(LoweredOp::Var(0))),
-            LoweredOp::Cosh(Box::new(LoweredOp::Var(0))),
-            LoweredOp::Tanh(Box::new(LoweredOp::Var(0))),
-            LoweredOp::Arcsin(Box::new(LoweredOp::Const(0.5))),
-            LoweredOp::Arccos(Box::new(LoweredOp::Const(0.5))),
-            LoweredOp::Arctan(Box::new(LoweredOp::Var(0))),
-            LoweredOp::Arcsinh(Box::new(LoweredOp::Var(0))),
-            LoweredOp::Arccosh(Box::new(LoweredOp::Const(1.5))),
-            LoweredOp::Arctanh(Box::new(LoweredOp::Const(0.5))),
-            LoweredOp::Exp(Box::new(LoweredOp::Var(0))),
-            LoweredOp::Ln(Box::new(LoweredOp::Const(1.0))),
-            LoweredOp::Neg(Box::new(LoweredOp::Var(0))),
-            LoweredOp::Add(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Const(1.0))),
-            LoweredOp::Sub(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Const(1.0))),
-            LoweredOp::Mul(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Const(2.0))),
-            LoweredOp::Div(Box::new(LoweredOp::Const(1.0)), Box::new(LoweredOp::Var(0))),
-            LoweredOp::Pow(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Const(2.0))),
+            LoweredOp::Sin(Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Cos(Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Tan(Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Sinh(Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Cosh(Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Tanh(Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Arcsin(Arc::new(LoweredOp::Const(0.5))),
+            LoweredOp::Arccos(Arc::new(LoweredOp::Const(0.5))),
+            LoweredOp::Arctan(Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Arcsinh(Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Arccosh(Arc::new(LoweredOp::Const(1.5))),
+            LoweredOp::Arctanh(Arc::new(LoweredOp::Const(0.5))),
+            LoweredOp::Exp(Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Ln(Arc::new(LoweredOp::Const(1.0))),
+            LoweredOp::Neg(Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Add(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Const(1.0))),
+            LoweredOp::Sub(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Const(1.0))),
+            LoweredOp::Mul(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Const(2.0))),
+            LoweredOp::Div(Arc::new(LoweredOp::Const(1.0)), Arc::new(LoweredOp::Var(0))),
+            LoweredOp::Pow(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Const(2.0))),
         ];
         for v in &variants {
             let json = serde_json::to_string(v).expect("serialize failed");
@@ -114,7 +115,7 @@ mod serde_tests {
     #[test]
     fn json_golden_snapshot_rename_all() {
         // With rename_all = "snake_case", variants become lowercase in JSON.
-        let op = LoweredOp::Add(Box::new(LoweredOp::Const(2.0)), Box::new(LoweredOp::Var(0)));
+        let op = LoweredOp::Add(Arc::new(LoweredOp::Const(2.0)), Arc::new(LoweredOp::Var(0)));
         let json = serde_json::to_string(&op).expect("serialize");
         // Renamed variants should appear as "add", "const", "var"
         assert!(

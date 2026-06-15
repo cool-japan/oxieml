@@ -1,6 +1,7 @@
 //! Tests for NamedConst and constants extraction.
 
 use oxieml::{LoweredOp, NamedConst, SymRegConfig, SymRegEngine};
+use std::sync::Arc;
 
 // ── NamedConst unit tests ─────────────────────────────────────────────────────
 
@@ -54,8 +55,8 @@ fn named_const_to_latex() {
 #[test]
 fn named_const_in_lowered_op_eval() {
     let op = LoweredOp::Mul(
-        Box::new(LoweredOp::NamedConst(NamedConst::Pi)),
-        Box::new(LoweredOp::Var(0)),
+        Arc::new(LoweredOp::NamedConst(NamedConst::Pi)),
+        Arc::new(LoweredOp::Var(0)),
     );
     let result = op.eval(&[2.0]);
     assert!(
@@ -68,8 +69,8 @@ fn named_const_in_lowered_op_eval() {
 #[test]
 fn named_const_pretty_print_in_tree() {
     let op = LoweredOp::Add(
-        Box::new(LoweredOp::NamedConst(NamedConst::Pi)),
-        Box::new(LoweredOp::Var(0)),
+        Arc::new(LoweredOp::NamedConst(NamedConst::Pi)),
+        Arc::new(LoweredOp::Var(0)),
     );
     let pretty = op.to_pretty();
     assert!(

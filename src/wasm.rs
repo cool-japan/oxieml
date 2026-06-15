@@ -57,6 +57,14 @@ impl WasmSymRegConfig {
         }
     }
 
+    /// Create an exhaustive (slow but thorough) configuration preset.
+    pub fn exhaustive() -> Self {
+        Self {
+            inner: crate::symreg::SymRegConfig::exhaustive(),
+            max_formulas: 10,
+        }
+    }
+
     /// Maximum tree depth to explore.
     #[wasm_bindgen(getter)]
     pub fn max_depth(&self) -> usize {
@@ -236,4 +244,62 @@ impl WasmSymRegEngine {
                     .collect()
             })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Free utility functions
+// ---------------------------------------------------------------------------
+
+/// Parse an expression string and evaluate it at the given variable values.
+///
+/// `vars` is a flat f64 slice where `vars[i]` is the value for variable `i`.
+#[wasm_bindgen]
+pub fn parse_and_eval(expr_str: &str, vars: &[f64]) -> Result<f64, JsValue> {
+    let tree = crate::parse(expr_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let lowered = tree.lower().simplify();
+    Ok(lowered.eval(vars))
+}
+
+/// Convert an expression string to a LaTeX representation.
+#[wasm_bindgen]
+pub fn to_latex_wasm(expr_str: &str) -> Result<String, JsValue> {
+    let tree = crate::parse(expr_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    Ok(tree.lower().simplify().to_latex())
+}
+
+/// Numerically evaluate a definite integral ∫_lo^hi f(x) dx.
+///
+/// `var` is the 0-based index of the integration variable.
+#[wasm_bindgen]
+pub fn integrate_definite_wasm(
+    expr_str: &str,
+    var: usize,
+    lo: f64,
+    hi: f64,
+) -> Result<f64, JsValue> {
+    let tree = crate::parse(expr_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let lowered = tree.lower().simplify();
+    let ctx = crate::EvalCtx::new(&[]);
+    lowered
+        .integrate_definite(var, lo, hi, &ctx)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Find all symbolic solutions of `expr_str = 0` for the given variable.
+///
+/// Returns a JSON array of LaTeX strings, e.g. `["x","\\frac{1}{2}"]`.
+#[wasm_bindgen]
+pub fn solve_for_all_wasm(expr_str: &str, var: usize) -> Result<String, JsValue> {
+    let tree = crate::parse(expr_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let lowered = tree.lower().simplify();
+    let zero = crate::LoweredOp::Const(0.0);
+    let result = crate::solve_for_all(&lowered, &zero, var)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    // Manually build JSON (serde_json is not available in wasm feature).
+    let parts: Vec<String> = result
+        .roots
+        .iter()
+        .map(|r| format!("{:?}", r.to_latex()))
+        .collect();
+    Ok(format!("[{}]", parts.join(",")))
 }

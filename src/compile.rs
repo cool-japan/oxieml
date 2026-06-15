@@ -196,6 +196,13 @@ fn emit_rust_expr(op: &LoweredOp) -> String {
         LoweredOp::Arctanh(a) => {
             format!("({}).atanh()", emit_rust_expr(a))
         }
+        LoweredOp::Erf(a) => format!("oxieml::special::erf({})", emit_rust_expr(a)),
+        LoweredOp::LGamma(a) => format!("oxieml::special::lgamma({})", emit_rust_expr(a)),
+        LoweredOp::Digamma(a) => format!("oxieml::special::digamma({})", emit_rust_expr(a)),
+        LoweredOp::Trigamma(a) => format!("oxieml::special::trigamma({})", emit_rust_expr(a)),
+        LoweredOp::Ei(a) => format!("oxieml::special::ei({})", emit_rust_expr(a)),
+        LoweredOp::Si(a) => format!("oxieml::special::si({})", emit_rust_expr(a)),
+        LoweredOp::Ci(a) => format!("oxieml::special::ci({})", emit_rust_expr(a)),
     }
 }
 

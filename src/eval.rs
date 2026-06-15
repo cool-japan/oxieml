@@ -89,6 +89,9 @@ impl EmlTree {
                 Instruction::PushOne => {
                     stack.push(Complex64::new(1.0, 0.0));
                 }
+                Instruction::PushConst(v) => {
+                    stack.push(Complex64::new(*v, 0.0));
+                }
                 Instruction::PushVar(idx) => {
                     let idx = *idx;
                     if idx >= vars.len() {
@@ -143,6 +146,7 @@ impl EmlTree {
 #[derive(Clone, Debug)]
 enum Instruction {
     PushOne,
+    PushConst(f64),
     PushVar(usize),
     Eml,
 }
@@ -157,6 +161,9 @@ fn eval_point(instructions: &[Instruction], point: &[f64]) -> Result<f64, EmlErr
         match inst {
             Instruction::PushOne => {
                 stack.push(Complex64::new(1.0, 0.0));
+            }
+            Instruction::PushConst(v) => {
+                stack.push(Complex64::new(*v, 0.0));
             }
             Instruction::PushVar(idx) => {
                 let idx = *idx;
@@ -188,6 +195,7 @@ fn eval_point(instructions: &[Instruction], point: &[f64]) -> Result<f64, EmlErr
 /// Flatten an EML tree into post-order instructions.
 fn flatten_postorder(node: &EmlNode, out: &mut Vec<Instruction>) {
     match node {
+        EmlNode::Const(v) => out.push(Instruction::PushConst(*v)),
         EmlNode::One => out.push(Instruction::PushOne),
         EmlNode::Var(idx) => out.push(Instruction::PushVar(*idx)),
         EmlNode::Eml { left, right } => {
@@ -321,5 +329,15 @@ mod tests {
         let data = vec![vec![1.0], vec![2.0], vec![3.0]];
         let result = t.eval_batch(&data);
         assert!(matches!(result, Err(EmlError::VarOutOfBounds(5, 1))));
+    }
+
+    #[test]
+    fn test_eval_const_leaf() {
+        let c = EmlTree::const_val(3.7);
+        let ctx = EvalCtx::new(&[]);
+        let result = c
+            .eval_real(&ctx)
+            .expect("eval of Const leaf should succeed");
+        assert!((result - 3.7).abs() < 1e-15);
     }
 }

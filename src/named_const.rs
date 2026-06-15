@@ -33,6 +33,20 @@ pub enum NamedConst {
     Third,
     /// 1/4
     Quarter,
+    /// 2π ≈ 6.283
+    TwoPi,
+    /// π/2 ≈ 1.5708
+    PiHalf,
+    /// √3 ≈ 1.7321
+    Sqrt3,
+    /// e² ≈ 7.3891
+    ESq,
+    /// Golden ratio φ = (1+√5)/2 ≈ 1.6180
+    Phi,
+    /// ln(2) ≈ 0.6931
+    Ln2,
+    /// −2
+    NegTwo,
 }
 
 impl NamedConst {
@@ -49,6 +63,13 @@ impl NamedConst {
             Self::NegHalf => -0.5,
             Self::Third => 1.0 / 3.0,
             Self::Quarter => 0.25,
+            Self::TwoPi => 2.0 * std::f64::consts::PI,
+            Self::PiHalf => std::f64::consts::PI / 2.0,
+            Self::Sqrt3 => 3.0_f64.sqrt(),
+            Self::ESq => std::f64::consts::E * std::f64::consts::E,
+            Self::Phi => (1.0 + 5.0_f64.sqrt()) / 2.0,
+            Self::Ln2 => 2.0_f64.ln(),
+            Self::NegTwo => -2.0,
         }
     }
 
@@ -65,6 +86,13 @@ impl NamedConst {
             Self::NegHalf => "(-1/2)",
             Self::Third => "(1/3)",
             Self::Quarter => "(1/4)",
+            Self::TwoPi => "2π",
+            Self::PiHalf => "(π/2)",
+            Self::Sqrt3 => "√3",
+            Self::ESq => "e²",
+            Self::Phi => "φ",
+            Self::Ln2 => "ln(2)",
+            Self::NegTwo => "(-2)",
         }
     }
 
@@ -81,6 +109,13 @@ impl NamedConst {
             Self::NegHalf => r"-\frac{1}{2}",
             Self::Third => r"\frac{1}{3}",
             Self::Quarter => r"\frac{1}{4}",
+            Self::TwoPi => r"2\pi",
+            Self::PiHalf => r"\frac{\pi}{2}",
+            Self::Sqrt3 => r"\sqrt{3}",
+            Self::ESq => r"e^{2}",
+            Self::Phi => r"\varphi",
+            Self::Ln2 => r"\ln(2)",
+            Self::NegTwo => "(-2)",
         }
     }
 }

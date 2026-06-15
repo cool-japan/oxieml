@@ -267,6 +267,49 @@ impl LoweredOp {
                     }
                 }
             }
+            Self::Erf(x) => {
+                let ix = x.eval_interval(vars);
+                // erf is monotone increasing: erf([lo, hi]) = [erf(lo), erf(hi)]
+                IntervalLO {
+                    lo: crate::special::erf(ix.lo),
+                    hi: crate::special::erf(ix.hi),
+                }
+            }
+            Self::LGamma(x) => {
+                // LGamma is complex; return full interval conservatively
+                let _ix = x.eval_interval(vars);
+                IntervalLO::full()
+            }
+            Self::Digamma(x) => {
+                let _ix = x.eval_interval(vars);
+                IntervalLO::full()
+            }
+            Self::Trigamma(x) => {
+                let _ix = x.eval_interval(vars);
+                IntervalLO::full()
+            }
+            Self::Ei(x) => {
+                let ix = x.eval_interval(vars);
+                let lo = crate::special::ei(ix.lo);
+                let hi = crate::special::ei(ix.hi);
+                IntervalLO {
+                    lo: lo.min(hi),
+                    hi: lo.max(hi),
+                }
+            }
+            Self::Si(x) => {
+                // Si is bounded by [-π/2 - ε, π/2 + ε]
+                let _ix = x.eval_interval(vars);
+                IntervalLO {
+                    lo: -(std::f64::consts::FRAC_PI_2 + 1e-10),
+                    hi: std::f64::consts::FRAC_PI_2 + 1e-10,
+                }
+            }
+            Self::Ci(x) => {
+                // Ci is unbounded for small x (goes to -∞)
+                let _ix = x.eval_interval(vars);
+                IntervalLO::full()
+            }
         }
     }
 }

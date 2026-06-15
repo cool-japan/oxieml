@@ -13,8 +13,8 @@
 //! - **Mul** — units multiply (exponent-wise addition).
 //! - **Div** — units divide (exponent-wise subtraction).
 //! - **Pow** — if the base is dimensionless the result is dimensionless;
-//!   otherwise the exponent must be a literal integer constant, and the
-//!   result is `base_units^n`.
+//!   otherwise the exponent must be a rational constant (integer or fraction),
+//!   and the result is `base_units^(num/den)`.
 //! - **Transcendentals** (`exp`, `ln`, `sin`, `cos`, … all 14) — argument
 //!   must be dimensionless; result is dimensionless.
 
@@ -42,8 +42,8 @@ impl LoweredOp {
     ///
     /// // x * t  where x has units of metres and t has units of seconds → m·s
     /// let expr = LoweredOp::Mul(
-    ///     Box::new(LoweredOp::Var(0)),
-    ///     Box::new(LoweredOp::Var(1)),
+    ///     std::sync::Arc::new(LoweredOp::Var(0)),
+    ///     std::sync::Arc::new(LoweredOp::Var(1)),
     /// );
     /// let var_units = [Units::METER, Units::SECOND];
     /// assert_eq!(
@@ -92,7 +92,7 @@ impl LoweredOp {
             Self::Div(a, b) => Ok(a.check_units(var_units)?.div(&b.check_units(var_units)?)),
 
             // Pow: dimensionless base → dimensionless result; dimensioned base
-            // requires an integer-constant exponent.
+            // requires a rational-constant exponent.
             Self::Pow(base, exp) => {
                 let base_units = base.check_units(var_units)?;
                 let exp_units = exp.check_units(var_units)?;
@@ -110,25 +110,19 @@ impl LoweredOp {
                     return Ok(Units::DIMENSIONLESS);
                 }
 
-                // Dimensioned base: exponent must be an integer constant.
+                // Dimensioned base: rationalize the exponent and apply pow_rational.
                 match exp.as_ref() {
                     Self::Const(n) => {
-                        let rounded = n.round() as i32;
-                        if (n - rounded as f64).abs() > 1e-9 {
-                            return Err(UnitError::NonRationalPower { base_units });
-                        }
+                        let r = rationalize_f64(*n, 12);
                         base_units
-                            .pow_int(rounded)
+                            .pow_rational(r.num, r.den)
                             .map_err(|_| UnitError::NonRationalPower { base_units })
                     }
                     Self::NamedConst(nc) => {
                         let v = nc.value();
-                        let rounded = v.round() as i32;
-                        if (v - rounded as f64).abs() > 1e-9 {
-                            return Err(UnitError::NonRationalPower { base_units });
-                        }
+                        let r = rationalize_f64(v, 12);
                         base_units
-                            .pow_int(rounded)
+                            .pow_rational(r.num, r.den)
                             .map_err(|_| UnitError::NonRationalPower { base_units })
                     }
                     _ => Err(UnitError::NonRationalPower { base_units }),
@@ -153,6 +147,12 @@ impl LoweredOp {
                     Self::Arcsinh(x) => (x.as_ref(), "arcsinh"),
                     Self::Arccosh(x) => (x.as_ref(), "arccosh"),
                     Self::Arctanh(x) => (x.as_ref(), "arctanh"),
+                    Self::Erf(x) => (x.as_ref(), "erf"),
+                    Self::LGamma(x) => (x.as_ref(), "lgamma"),
+                    Self::Digamma(x) => (x.as_ref(), "digamma"),
+                    Self::Ei(x) => (x.as_ref(), "Ei"),
+                    Self::Si(x) => (x.as_ref(), "Si"),
+                    Self::Ci(x) => (x.as_ref(), "Ci"),
                     // All other variants are already handled above.
                     _ => unreachable!("all non-transcendental variants handled before this arm"),
                 };
@@ -169,4 +169,50 @@ impl LoweredOp {
             }
         }
     }
+}
+
+/// Approximate `x` as a rational `num/den` with `den <= max_den`.
+///
+/// Uses exhaustive denominator search — small `max_den` keeps this fast.
+/// The result is always normalized (gcd(num.abs(), den) == 1, den > 0).
+pub(crate) fn rationalize_f64(x: f64, max_den: i16) -> crate::units::Rexp {
+    use crate::units::Rexp;
+    if !x.is_finite() {
+        return Rexp::ZERO;
+    }
+    let sign: i16 = if x < 0.0 { -1 } else { 1 };
+    let x_abs = x.abs();
+
+    // Check if exactly integer
+    let integer_part = x_abs.floor() as i16;
+    if (x_abs - integer_part as f64).abs() < 1e-10 {
+        return Rexp {
+            num: sign * integer_part,
+            den: 1,
+        };
+    }
+
+    let mut best_num = sign * integer_part;
+    let mut best_den: i16 = 1;
+    let mut best_err = (x_abs - integer_part as f64).abs();
+
+    for den in 1i16..=max_den {
+        let num_f = x_abs * den as f64;
+        let num = num_f.round() as i16;
+        if num < 0 {
+            continue;
+        }
+        let err = (x_abs - num as f64 / den as f64).abs();
+        if err < best_err {
+            best_err = err;
+            best_num = sign * num;
+            best_den = den;
+        }
+        if best_err < 1e-12 {
+            break;
+        }
+    }
+
+    // Normalize
+    Rexp::from_ratio(best_num, best_den)
 }

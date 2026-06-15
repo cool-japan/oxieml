@@ -91,6 +91,21 @@ mod inner {
             OxiOp::Arcsinh => out[0] = 19,
             OxiOp::Arccosh => out[0] = 20,
             OxiOp::Arctanh => out[0] = 21,
+            OxiOp::Erf => out[0] = 24,
+            OxiOp::LGamma => out[0] = 25,
+            OxiOp::Digamma => out[0] = 26,
+            OxiOp::Ei => out[0] = 27,
+            OxiOp::Si => out[0] = 28,
+            OxiOp::Ci => out[0] = 29,
+            OxiOp::Trigamma => out[0] = 30,
+            OxiOp::Store(k) => {
+                out[0] = 22;
+                out[1..9].copy_from_slice(&(*k as u64).to_le_bytes());
+            }
+            OxiOp::Load(k) => {
+                out[0] = 23;
+                out[1..9].copy_from_slice(&(*k as u64).to_le_bytes());
+            }
         }
         out
     }
@@ -173,6 +188,13 @@ mod inner {
             jit_builder.symbol("asinh", f64::asinh as *const u8);
             jit_builder.symbol("acosh", f64::acosh as *const u8);
             jit_builder.symbol("atanh", f64::atanh as *const u8);
+            jit_builder.symbol("oxieml_erf", crate::special::erf as *const u8);
+            jit_builder.symbol("oxieml_lgamma", crate::special::lgamma as *const u8);
+            jit_builder.symbol("oxieml_digamma", crate::special::digamma as *const u8);
+            jit_builder.symbol("oxieml_ei", crate::special::ei as *const u8);
+            jit_builder.symbol("oxieml_si", crate::special::si as *const u8);
+            jit_builder.symbol("oxieml_ci", crate::special::ci as *const u8);
+            jit_builder.symbol("oxieml_trigamma", crate::special::trigamma as *const u8);
 
             let mut module = JITModule::new(jit_builder);
 
@@ -216,6 +238,8 @@ mod inner {
 
                 // Stack for cranelift Values
                 let mut vstack: Vec<cranelift_codegen::ir::Value> = Vec::new();
+                // Slot register file: maps slot index to SSA Value (for Store/Load).
+                let mut slot_values: HashMap<usize, cranelift_codegen::ir::Value> = HashMap::new();
 
                 for op in ops {
                     emit_op(
@@ -225,6 +249,7 @@ mod inner {
                         vars_ptr_val,
                         &extern_ids,
                         &mut module,
+                        &mut slot_values,
                     )?;
                 }
 
@@ -298,6 +323,13 @@ mod inner {
         asinh: FuncId,
         acosh: FuncId,
         atanh: FuncId,
+        erf: FuncId,
+        lgamma: FuncId,
+        digamma_fn: FuncId,
+        trigamma_fn: FuncId,
+        ei_fn: FuncId,
+        si_fn: FuncId,
+        ci_fn: FuncId,
     }
 
     /// Declare all external math functions in the module.
@@ -334,6 +366,13 @@ mod inner {
             asinh: decl1!("asinh"),
             acosh: decl1!("acosh"),
             atanh: decl1!("atanh"),
+            erf: decl1!("oxieml_erf"),
+            lgamma: decl1!("oxieml_lgamma"),
+            digamma_fn: decl1!("oxieml_digamma"),
+            trigamma_fn: decl1!("oxieml_trigamma"),
+            ei_fn: decl1!("oxieml_ei"),
+            si_fn: decl1!("oxieml_si"),
+            ci_fn: decl1!("oxieml_ci"),
         })
     }
 
@@ -347,6 +386,7 @@ mod inner {
         vars_ptr: cranelift_codegen::ir::Value,
         extern_ids: &ExternIds,
         module: &mut JITModule,
+        slot_values: &mut HashMap<usize, cranelift_codegen::ir::Value>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match op {
             OxiOp::Const(c) => {
@@ -461,6 +501,54 @@ mod inner {
                 let a = vstack.pop().ok_or("stack underflow at Arctanh")?;
                 let result = call_extern1(builder, module, extern_ids.atanh, a)?;
                 vstack.push(result);
+            }
+            OxiOp::Erf => {
+                let a = vstack.pop().ok_or("stack underflow at Erf")?;
+                let result = call_extern1(builder, module, extern_ids.erf, a)?;
+                vstack.push(result);
+            }
+            OxiOp::LGamma => {
+                let a = vstack.pop().ok_or("stack underflow at LGamma")?;
+                let result = call_extern1(builder, module, extern_ids.lgamma, a)?;
+                vstack.push(result);
+            }
+            OxiOp::Digamma => {
+                let a = vstack.pop().ok_or("stack underflow at Digamma")?;
+                let result = call_extern1(builder, module, extern_ids.digamma_fn, a)?;
+                vstack.push(result);
+            }
+            OxiOp::Trigamma => {
+                let a = vstack.pop().ok_or("stack underflow at Trigamma")?;
+                let result = call_extern1(builder, module, extern_ids.trigamma_fn, a)?;
+                vstack.push(result);
+            }
+            OxiOp::Ei => {
+                let a = vstack.pop().ok_or("stack underflow at Ei")?;
+                let result = call_extern1(builder, module, extern_ids.ei_fn, a)?;
+                vstack.push(result);
+            }
+            OxiOp::Si => {
+                let a = vstack.pop().ok_or("stack underflow at Si")?;
+                let result = call_extern1(builder, module, extern_ids.si_fn, a)?;
+                vstack.push(result);
+            }
+            OxiOp::Ci => {
+                let a = vstack.pop().ok_or("stack underflow at Ci")?;
+                let result = call_extern1(builder, module, extern_ids.ci_fn, a)?;
+                vstack.push(result);
+            }
+            OxiOp::Store(k) => {
+                // Peek top of vstack (does NOT pop) and record the SSA value in slot k.
+                let top = *vstack.last().ok_or("stack underflow at Store")?;
+                slot_values.insert(*k, top);
+            }
+            OxiOp::Load(k) => {
+                // Push the SSA value previously stored in slot k.
+                let v = slot_values
+                    .get(k)
+                    .copied()
+                    .ok_or_else(|| format!("OxiOp::Load({k}) before Store — malformed IR"))?;
+                vstack.push(v);
             }
         }
         Ok(())

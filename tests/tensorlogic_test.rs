@@ -10,6 +10,7 @@
 use oxieml::lower::LoweredOp;
 use oxieml::tensorlogic::{canonical_rewrite_rules, canonical_simplify, from_tlexpr, to_tlexpr};
 use rand::{Rng, RngExt};
+use std::sync::Arc;
 use tensorlogic_ir::{TLExpr, Term};
 
 /// Maximum allowed absolute error between the original and the
@@ -32,21 +33,21 @@ fn safe_sample(rng: &mut impl Rng) -> (f64, f64) {
 /// Build `LoweredOp` representing `exp(x) - y`.
 fn build_exp_x_minus_y() -> LoweredOp {
     LoweredOp::Sub(
-        Box::new(LoweredOp::Exp(Box::new(LoweredOp::Var(0)))),
-        Box::new(LoweredOp::Var(1)),
+        Arc::new(LoweredOp::Exp(Arc::new(LoweredOp::Var(0)))),
+        Arc::new(LoweredOp::Var(1)),
     )
 }
 
 /// Build `LoweredOp` representing `(x + 1) * (y - 2)`.
 fn build_add_mul() -> LoweredOp {
     LoweredOp::Mul(
-        Box::new(LoweredOp::Add(
-            Box::new(LoweredOp::Var(0)),
-            Box::new(LoweredOp::Const(1.0)),
+        Arc::new(LoweredOp::Add(
+            Arc::new(LoweredOp::Var(0)),
+            Arc::new(LoweredOp::Const(1.0)),
         )),
-        Box::new(LoweredOp::Sub(
-            Box::new(LoweredOp::Var(1)),
-            Box::new(LoweredOp::Const(2.0)),
+        Arc::new(LoweredOp::Sub(
+            Arc::new(LoweredOp::Var(1)),
+            Arc::new(LoweredOp::Const(2.0)),
         )),
     )
 }
@@ -98,7 +99,7 @@ fn roundtrip_add_mul() {
 fn tlexpr_has_correct_shape() {
     // LoweredOp::Add(Const(3.0), Var(0)) must lower to
     //   TLExpr::Add(TLExpr::Constant(3.0), TLExpr::Pred { name: "x0", ... })
-    let op = LoweredOp::Add(Box::new(LoweredOp::Const(3.0)), Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Add(Arc::new(LoweredOp::Const(3.0)), Arc::new(LoweredOp::Var(0)));
     let tl = to_tlexpr(&op);
 
     let (lhs, rhs) = match &tl {
@@ -133,7 +134,7 @@ fn neg_roundtrips_numerically_via_zero_sub() {
     // structural round-trip gives `LoweredOp::Sub(Const(0.0), x)` — which
     // is numerically identical but not structurally equal. We verify the
     // numeric contract here.
-    let op = LoweredOp::Neg(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Neg(Arc::new(LoweredOp::Var(0)));
     let tl = to_tlexpr(&op);
     let restored = from_tlexpr(&tl).expect("neg encodes via Sub(0, _)");
 
@@ -161,7 +162,7 @@ fn canonical_simplify_on_roundtrip_expression() {
     // `LoweredOp::Add(Var(0), Const(0.0))` lowers to
     //   `TLExpr::Add(x0_pred, Constant(0.0))`
     // which should simplify to just the predicate for Var(0).
-    let op = LoweredOp::Add(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Const(0.0)));
+    let op = LoweredOp::Add(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Const(0.0)));
     let tl = to_tlexpr(&op);
     let simplified = canonical_simplify(&tl);
 
@@ -191,7 +192,7 @@ fn canonical_simplify_on_roundtrip_expression() {
 fn canonical_simplify_exp_log_through_bridge() {
     // exp(ln(x)) should collapse to just x after `canonical_simplify`,
     // exercising the full pipeline LoweredOp -> TLExpr -> simplify.
-    let op = LoweredOp::Exp(Box::new(LoweredOp::Ln(Box::new(LoweredOp::Var(0)))));
+    let op = LoweredOp::Exp(Arc::new(LoweredOp::Ln(Arc::new(LoweredOp::Var(0)))));
     let tl = to_tlexpr(&op);
     let simplified = canonical_simplify(&tl);
     let restored = from_tlexpr(&simplified).expect("simplified exp(ln(x)) round-trips");
@@ -410,6 +411,9 @@ mod df_tl_adapter {
             pretty: "1".to_string(),
             params: vec![],
             cv_mse: None,
+            aic: 0.0,
+            bic: 0.0,
+            param_intervals: None,
         }
     }
 

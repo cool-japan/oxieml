@@ -1,131 +1,11 @@
-//! Python bindings for OxiEML via PyO3.
-//!
-//! Exposes [`PySymRegConfig`], [`PySymRegEngine`], and [`PyDiscoveredFormula`]
-//! to Python, matching the Rust API in [`crate::symreg`].
-//!
-//! # Usage (Python)
-//! ```python
-//! import numpy as np
-//! import oxieml
-//!
-//! config = oxieml.SymRegConfig.quick()
-//! engine = oxieml.SymRegEngine(config)
-//!
-//! X = np.column_stack([x_data])   # shape (n, n_features)
-//! y = y_data                       # shape (n,)
-//!
-//! formulas = engine.discover(X, y)
-//! for f in formulas:
-//!     print(f.pretty, f.mse)
-//! ```
+//! Python bindings for symbolic regression and ODE solving.
 
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-// ---------------------------------------------------------------------------
-// PySymRegConfig
-// ---------------------------------------------------------------------------
-
-/// Configuration for the symbolic regression engine.
-///
-/// Use the class-methods `quick`, `balanced`, or `exhaustive` for
-/// sensible presets, then override individual attributes as needed.
-#[pyclass(name = "SymRegConfig", from_py_object)]
-#[derive(Clone)]
-pub struct PySymRegConfig {
-    inner: crate::symreg::SymRegConfig,
-    /// Maximum number of formulas to return from [`PySymRegEngine::discover`].
-    ///
-    /// The engine may find more candidates; this limits the returned slice.
-    /// `0` means unlimited (return all).
-    pub max_formulas: usize,
-}
-
-#[pymethods]
-impl PySymRegConfig {
-    /// Create a quick (shallow/fast) configuration preset.
-    #[staticmethod]
-    pub fn quick() -> Self {
-        Self {
-            inner: crate::symreg::SymRegConfig::quick(),
-            max_formulas: 0,
-        }
-    }
-
-    /// Create a balanced (production-default) configuration preset.
-    #[staticmethod]
-    pub fn balanced() -> Self {
-        Self {
-            inner: crate::symreg::SymRegConfig::balanced(),
-            max_formulas: 0,
-        }
-    }
-
-    /// Create an exhaustive (slow but thorough) configuration preset.
-    #[staticmethod]
-    pub fn exhaustive() -> Self {
-        Self {
-            inner: crate::symreg::SymRegConfig::exhaustive(),
-            max_formulas: 0,
-        }
-    }
-
-    /// Maximum tree depth to explore.
-    #[getter]
-    pub fn depth_limit(&self) -> usize {
-        self.inner.max_depth
-    }
-
-    /// Set the maximum tree depth.
-    #[setter]
-    pub fn set_depth_limit(&mut self, v: usize) {
-        self.inner.max_depth = v;
-    }
-
-    /// Maximum number of formulas to return (0 = unlimited).
-    #[getter]
-    pub fn get_max_formulas(&self) -> usize {
-        self.max_formulas
-    }
-
-    /// Set the maximum number of formulas to return.
-    #[setter]
-    pub fn set_max_formulas(&mut self, v: usize) {
-        self.max_formulas = v;
-    }
-
-    /// Adam optimizer iteration budget per topology.
-    #[getter]
-    pub fn adam_steps(&self) -> usize {
-        self.inner.max_iter
-    }
-
-    /// Set the Adam optimizer iteration budget.
-    #[setter]
-    pub fn set_adam_steps(&mut self, v: usize) {
-        self.inner.max_iter = v;
-    }
-
-    /// Optional RNG seed for reproducible runs.
-    #[getter]
-    pub fn seed(&self) -> Option<u64> {
-        self.inner.seed
-    }
-
-    /// Set the RNG seed (`None` for non-deterministic).
-    #[setter]
-    pub fn set_seed(&mut self, v: Option<u64>) {
-        self.inner.seed = v;
-    }
-
-    /// Human-readable representation.
-    pub fn __repr__(&self) -> String {
-        format!(
-            "SymRegConfig(depth_limit={}, adam_steps={}, max_formulas={})",
-            self.inner.max_depth, self.inner.max_iter, self.max_formulas
-        )
-    }
+fn map_err(e: impl std::fmt::Display) -> PyErr {
+    PyValueError::new_err(e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +16,7 @@ impl PySymRegConfig {
 #[pyclass(name = "DiscoveredFormula", from_py_object)]
 #[derive(Clone)]
 pub struct PyDiscoveredFormula {
-    inner: crate::symreg::DiscoveredFormula,
+    pub(crate) inner: crate::symreg::DiscoveredFormula,
 }
 
 #[pymethods]
@@ -211,14 +91,14 @@ impl PyDiscoveredFormula {
 /// Construct with a `SymRegConfig` and call `discover` with NumPy arrays.
 #[pyclass(name = "SymRegEngine")]
 pub struct PySymRegEngine {
-    config: PySymRegConfig,
+    pub(crate) config: super::PySymRegConfig,
 }
 
 #[pymethods]
 impl PySymRegEngine {
     /// Create a new engine from the given configuration.
     #[new]
-    pub fn new(config: &PySymRegConfig) -> Self {
+    pub fn new(config: &super::PySymRegConfig) -> Self {
         Self {
             config: config.clone(),
         }
@@ -261,7 +141,6 @@ impl PySymRegEngine {
         }
 
         // Convert from row-major matrix to per-row sample vectors.
-        // `inputs[i]` = feature vector of the i-th data point.
         let mut inputs: Vec<Vec<f64>> = Vec::with_capacity(n_samples);
         for i in 0..n_samples {
             let mut row = Vec::with_capacity(n_features);
@@ -304,14 +183,45 @@ impl PySymRegEngine {
 }
 
 // ---------------------------------------------------------------------------
-// Module definition
+// dsolve_py
 // ---------------------------------------------------------------------------
 
-/// Register the `oxieml._core` Python extension module.
-#[pymodule]
-pub fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PySymRegConfig>()?;
-    m.add_class::<PyDiscoveredFormula>()?;
-    m.add_class::<PySymRegEngine>()?;
-    Ok(())
+/// Symbolically solve an ODE.
+///
+/// The ODE is expressed as a residual `expr_str = 0` with variable slots:
+/// - `x_var`: independent variable slot
+/// - `y_var`: dependent variable slot
+/// - `dy_var`: first derivative y′ slot
+/// - `d2y_var`: second derivative y″ slot
+/// - `c_start`: first free constant slot (must be ≥ max of above + 1)
+///
+/// Returns a tuple `(solution_latex, kind_str)` where:
+/// - `solution_latex` is the LaTeX of the solution expression, or `"Unsolved"`
+/// - `kind_str` identifies the family (e.g. `"Separable"`, `"FirstOrderLinear"`)
+#[pyfunction]
+pub fn dsolve_py(
+    expr_str: &str,
+    x_var: usize,
+    y_var: usize,
+    dy_var: usize,
+    d2y_var: usize,
+    c_start: usize,
+) -> PyResult<(String, String)> {
+    let tree = crate::parse(expr_str).map_err(map_err)?;
+    let lowered = tree.lower().simplify();
+    let form = crate::OdeForm {
+        x: x_var,
+        y: y_var,
+        dy: dy_var,
+        d2y: d2y_var,
+        c_start,
+    };
+    let (sol, kind) = crate::dsolve(&lowered, &form);
+    let sol_latex = match sol {
+        crate::OdeSolution::Explicit(expr) => expr.to_latex(),
+        crate::OdeSolution::Implicit(expr) => expr.to_latex(),
+        crate::OdeSolution::Unsolved => "Unsolved".to_owned(),
+    };
+    let kind_str = format!("{kind:?}");
+    Ok((sol_latex, kind_str))
 }

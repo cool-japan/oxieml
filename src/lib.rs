@@ -38,25 +38,41 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_precision_loss)]
 
+pub mod autodiff;
 pub mod canonical;
 pub mod compile;
 pub mod error;
 pub mod eval;
 pub mod grad;
+pub mod integrate;
+pub(crate) mod integrate_subst;
+pub mod limit;
+pub mod linalg;
 pub mod lower;
+pub mod lower_cse;
 pub mod lower_grad;
 pub mod lower_interval;
 pub mod lower_simplify;
 pub mod lower_units;
 pub mod named_const;
+pub mod numeric;
+pub mod numeric_verified;
+pub mod ode;
 pub mod parser;
+pub mod poly;
+pub mod quadrature_nd;
+pub mod series;
 #[cfg(feature = "simd")]
 pub mod simd_eval;
+pub(crate) mod simd_vec_math;
 pub mod simplify;
 #[cfg(feature = "smt")]
 pub mod smt;
 pub mod solve;
+pub mod solve_poly;
+pub mod special;
 pub mod symreg;
+pub mod system;
 #[cfg(feature = "tensorlogic")]
 pub mod tensorlogic;
 pub mod tree;
@@ -78,16 +94,31 @@ pub mod jit;
 pub use canonical::Canonical;
 pub use error::EmlError;
 pub use eval::EvalCtx;
+pub use integrate::IntegrateResult;
+pub use limit::{LimitPoint, LimitResult};
 pub use lower::LoweredOp;
 pub use lower_interval::IntervalLO;
 pub use named_const::NamedConst;
+pub use numeric::{QuadOpts, RootOpts};
+pub use numeric::{lambert_w0, lambert_wm1};
+pub use numeric_verified::{RootCertificate, RootStatus, VerifiedQuadOpts};
+pub use ode::{OdeForm, OdeKind, OdeSolution, dsolve};
 pub use parser::{ParseError, parse};
+pub use poly::{Factorization, MultiPoly, Poly, PolyError};
+pub use quadrature_nd::{QuadNdMethod, QuadNdOpts, quadrature_nd};
 pub use solve::SolveResult;
+pub use solve::{SystemSolveResult, solve_for_all, solve_linear_system};
+pub use solve_poly::RootsResult;
 pub use symreg::SymRegLoss;
 pub use symreg::{
-    DiscoveredFormula, MultiOutputStrategy, SymRegConfig, SymRegEngine, SymRegStrategy,
+    DiscoveredFormula, LmConfig, MultiOutputStrategy, OptimizerKind, PdeConfig, PdeResult,
+    SelectionCriterion, SharedFormula, SymRegConfig, SymRegEngine, SymRegStrategy, discover_pde,
     pareto_front,
 };
+pub use symreg::{
+    LibraryTerm, SindyConfig, SindyEquation, SindyMode, SindyResult, discover_ode_sindy,
+};
+pub use system::{SystemOpts, solve_system_newton};
 pub use tree::{EmlNode, EmlTree};
 pub use units::{UnitError, Units};
 

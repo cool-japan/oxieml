@@ -7,6 +7,7 @@
 
 use oxieml::units::{UnitError, Units};
 use oxieml::{LoweredOp, SymRegConfig, SymRegEngine};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Units algebra
@@ -27,7 +28,7 @@ fn var_returns_its_units() {
 #[test]
 fn add_compatible_units_ok() {
     // x0 [m] + x1 [m] → [m]
-    let expr = LoweredOp::Add(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let expr = LoweredOp::Add(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let result = expr.check_units(&[Units::METER, Units::METER]);
     assert_eq!(result, Ok(Units::METER));
 }
@@ -35,7 +36,7 @@ fn add_compatible_units_ok() {
 #[test]
 fn add_incompatible_units_err() {
     // x0 [m] + x1 [s] → error
-    let expr = LoweredOp::Add(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let expr = LoweredOp::Add(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let result = expr.check_units(&[Units::METER, Units::SECOND]);
     assert!(matches!(
         result,
@@ -47,7 +48,7 @@ fn add_incompatible_units_err() {
 #[test]
 fn mul_combines_units() {
     // x0 [m] * x1 [s] → [m·s]
-    let expr = LoweredOp::Mul(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let expr = LoweredOp::Mul(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let result = expr.check_units(&[Units::METER, Units::SECOND]);
     let expected = Units::new([1, 0, 1, 0, 0, 0, 0]);
     assert_eq!(result, Ok(expected));
@@ -56,7 +57,7 @@ fn mul_combines_units() {
 #[test]
 fn div_subtracts_units() {
     // x0 [m] / x1 [s] → [m/s]  = [1,0,-1,0,0,0,0]
-    let expr = LoweredOp::Div(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let expr = LoweredOp::Div(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let result = expr.check_units(&[Units::METER, Units::SECOND]);
     let expected = Units::new([1, 0, -1, 0, 0, 0, 0]);
     assert_eq!(result, Ok(expected));
@@ -65,27 +66,30 @@ fn div_subtracts_units() {
 #[test]
 fn pow_integer_scales_units() {
     // x0 [m] ^ 2 → [m²]  = [2,0,0,0,0,0,0]
-    let expr = LoweredOp::Pow(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Const(2.0)));
+    let expr = LoweredOp::Pow(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Const(2.0)));
     let result = expr.check_units(&[Units::METER]);
     let expected = Units::new([2, 0, 0, 0, 0, 0, 0]);
     assert_eq!(result, Ok(expected));
 }
 
 #[test]
-fn pow_non_integer_with_units_err() {
-    // x0 [m] ^ 0.5  — non-integer exponent with dimensional base → error
-    let expr = LoweredOp::Pow(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Const(0.5)));
+fn pow_rational_exponent_with_units_ok() {
+    // x0 [m] ^ 0.5 → m^(1/2)  (rationalized from 0.5)
+    let expr = LoweredOp::Pow(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Const(0.5)));
     let result = expr.check_units(&[Units::METER]);
     assert!(
-        matches!(result, Err(UnitError::NonRationalPower { .. })),
-        "expected NonRationalPower, got {result:?}"
+        result.is_ok(),
+        "m^0.5 should succeed (rational 1/2), got {:?}",
+        result
     );
+    let expected = Units::METER.sqrt();
+    assert_eq!(result.unwrap(), expected);
 }
 
 #[test]
 fn exp_requires_dimensionless() {
     // exp(x0 [m]) → error: argument must be dimensionless
-    let expr = LoweredOp::Exp(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Exp(Arc::new(LoweredOp::Var(0)));
     let result = expr.check_units(&[Units::METER]);
     assert!(
         matches!(
@@ -99,7 +103,7 @@ fn exp_requires_dimensionless() {
 #[test]
 fn exp_dimensionless_ok() {
     // exp(x0 [dimensionless]) → dimensionless
-    let expr = LoweredOp::Exp(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Exp(Arc::new(LoweredOp::Var(0)));
     let result = expr.check_units(&[Units::DIMENSIONLESS]);
     assert_eq!(result, Ok(Units::DIMENSIONLESS));
 }
@@ -109,10 +113,10 @@ fn newton_formula_checks() {
     // F = m * (v/t): Mul(Var(0), Div(Var(1), Var(2)))
     // var_units = [kg, m/s, s]  →  kg * (m/s / s) = kg * m/s² = N
     let expr = LoweredOp::Mul(
-        Box::new(LoweredOp::Var(0)),
-        Box::new(LoweredOp::Div(
-            Box::new(LoweredOp::Var(1)),
-            Box::new(LoweredOp::Var(2)),
+        Arc::new(LoweredOp::Var(0)),
+        Arc::new(LoweredOp::Div(
+            Arc::new(LoweredOp::Var(1)),
+            Arc::new(LoweredOp::Var(2)),
         )),
     );
     let velocity = Units::METER.div(&Units::SECOND); // m/s
@@ -220,21 +224,21 @@ fn var_index_out_of_range_err() {
 
 #[test]
 fn sub_compatible_units_ok() {
-    let expr = LoweredOp::Sub(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let expr = LoweredOp::Sub(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let result = expr.check_units(&[Units::KILOGRAM, Units::KILOGRAM]);
     assert_eq!(result, Ok(Units::KILOGRAM));
 }
 
 #[test]
 fn neg_preserves_units() {
-    let expr = LoweredOp::Neg(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Neg(Arc::new(LoweredOp::Var(0)));
     let result = expr.check_units(&[Units::METER]);
     assert_eq!(result, Ok(Units::METER));
 }
 
 #[test]
 fn ln_requires_dimensionless() {
-    let expr = LoweredOp::Ln(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Ln(Arc::new(LoweredOp::Var(0)));
     let result = expr.check_units(&[Units::SECOND]);
     assert!(
         matches!(
@@ -247,7 +251,7 @@ fn ln_requires_dimensionless() {
 
 #[test]
 fn sin_requires_dimensionless() {
-    let expr = LoweredOp::Sin(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Sin(Arc::new(LoweredOp::Var(0)));
     let result = expr.check_units(&[Units::AMPERE]);
     assert!(
         matches!(
@@ -261,7 +265,7 @@ fn sin_requires_dimensionless() {
 #[test]
 fn pow_with_symbolic_exponent_and_units_err() {
     // x0 [m] ^ x1 [dimensionless but non-const] → NonRationalPower
-    let expr = LoweredOp::Pow(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let expr = LoweredOp::Pow(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let result = expr.check_units(&[Units::METER, Units::DIMENSIONLESS]);
     assert!(
         matches!(result, Err(UnitError::NonRationalPower { .. })),
@@ -272,7 +276,7 @@ fn pow_with_symbolic_exponent_and_units_err() {
 #[test]
 fn pow_dimensionless_base_any_exponent_ok() {
     // dimensionless ^ x1 [dimensionless] → DIMENSIONLESS
-    let expr = LoweredOp::Pow(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let expr = LoweredOp::Pow(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let result = expr.check_units(&[Units::DIMENSIONLESS, Units::DIMENSIONLESS]);
     assert_eq!(result, Ok(Units::DIMENSIONLESS));
 }
@@ -292,4 +296,75 @@ fn unit_filter_none_is_default() {
         config.unit_filter.is_none(),
         "unit_filter must default to None"
     );
+}
+
+#[test]
+fn test_rexp_from_int_preserves_integer_behavior() {
+    use oxieml::units::Rexp;
+    let r = Rexp::from_int(3);
+    assert_eq!(r.num, 3);
+    assert_eq!(r.den, 1);
+    assert!(r.is_integer());
+    assert_eq!(r.to_i8(), Some(3));
+}
+
+#[test]
+fn test_rexp_sqrt_of_area_is_length() {
+    // sqrt(m²) = m (1/2 * 2 = 1)
+    let m2 = Units::METER.pow_int(2).expect("no overflow");
+    let m = m2.sqrt();
+    assert_eq!(m.0[0].to_i8(), Some(1), "sqrt(m²) should give m^1");
+}
+
+#[test]
+fn test_rexp_sqrt_of_meter_is_half_power() {
+    use oxieml::units::Rexp;
+    let m_half = Units::METER.sqrt();
+    assert_eq!(
+        m_half.0[0],
+        Rexp::from_ratio(1, 2),
+        "sqrt(m) should be m^(1/2)"
+    );
+}
+
+#[test]
+fn test_rexp_mul_half_plus_half_is_one() {
+    // m^(1/2) * m^(1/2) = m
+    let m_half = Units::METER.sqrt();
+    let m = m_half.mul(&m_half);
+    assert_eq!(m.0[0].to_i8(), Some(1), "m^(1/2) * m^(1/2) = m");
+}
+
+#[test]
+fn test_legacy_integer_ops_preserved() {
+    let m = Units::METER;
+    let m2 = m.pow_int(2).expect("no overflow");
+    assert_eq!(m2.0[0].to_i8(), Some(2));
+    let m_back = m2.div(&m);
+    assert_eq!(m_back.0[0].to_i8(), Some(1));
+}
+
+#[test]
+fn test_units_display_rational() {
+    let m_half = Units::METER.sqrt();
+    let s = m_half.to_string();
+    assert!(
+        s.contains("(1/2)"),
+        "rational display should show (1/2), got: {s}"
+    );
+}
+
+#[test]
+fn test_units_new_from_int_array() {
+    let v = Units::new([1, 0, -1, 0, 0, 0, 0]);
+    assert_eq!(v.try_into_int_exps(), Some([1i8, 0, -1, 0, 0, 0, 0]));
+}
+
+#[test]
+fn test_with_units_convenience() {
+    let config = SymRegConfig::default().with_units(vec![Units::METER], Units::METER);
+    assert!(config.unit_filter.is_some());
+    let (var_units, target) = config.unit_filter.unwrap();
+    assert_eq!(var_units[0], Units::METER);
+    assert_eq!(target, Units::METER);
 }

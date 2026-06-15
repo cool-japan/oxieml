@@ -45,8 +45,8 @@
 //! use oxieml::tensorlogic::{from_tlexpr, to_tlexpr};
 //!
 //! let op = LoweredOp::Add(
-//!     Box::new(LoweredOp::Const(3.0)),
-//!     Box::new(LoweredOp::Var(0)),
+//!     std::sync::Arc::new(LoweredOp::Const(3.0)),
+//!     std::sync::Arc::new(LoweredOp::Var(0)),
 //! );
 //! let tl = to_tlexpr(&op);
 //! let round_trip = from_tlexpr(&tl).expect("bridge round-trip");
@@ -56,6 +56,7 @@
 
 use crate::error::EmlError;
 use crate::lower::LoweredOp;
+use std::sync::Arc;
 use tensorlogic_ir::{Pattern, RewriteRule, TLExpr, Term};
 
 /// Build the `TLExpr::Pred` used to represent `LoweredOp::Var(i)`.
@@ -173,6 +174,14 @@ pub fn to_tlexpr(op: &LoweredOp) -> TLExpr {
         LoweredOp::Arctan(_) | LoweredOp::Arcsin(_) | LoweredOp::Arccos(_) => {
             TLExpr::Constant(f64::NAN)
         }
+        // Special functions: no TLExpr native variant, return NaN sentinel
+        LoweredOp::Erf(_)
+        | LoweredOp::LGamma(_)
+        | LoweredOp::Digamma(_)
+        | LoweredOp::Trigamma(_)
+        | LoweredOp::Ei(_)
+        | LoweredOp::Si(_)
+        | LoweredOp::Ci(_) => TLExpr::Constant(f64::NAN),
     }
 }
 
@@ -198,30 +207,30 @@ pub fn from_tlexpr(expr: &TLExpr) -> Result<LoweredOp, EmlError> {
             ))),
         },
         TLExpr::Add(a, b) => Ok(LoweredOp::Add(
-            Box::new(from_tlexpr(a)?),
-            Box::new(from_tlexpr(b)?),
+            Arc::new(from_tlexpr(a)?),
+            Arc::new(from_tlexpr(b)?),
         )),
         TLExpr::Sub(a, b) => Ok(LoweredOp::Sub(
-            Box::new(from_tlexpr(a)?),
-            Box::new(from_tlexpr(b)?),
+            Arc::new(from_tlexpr(a)?),
+            Arc::new(from_tlexpr(b)?),
         )),
         TLExpr::Mul(a, b) => Ok(LoweredOp::Mul(
-            Box::new(from_tlexpr(a)?),
-            Box::new(from_tlexpr(b)?),
+            Arc::new(from_tlexpr(a)?),
+            Arc::new(from_tlexpr(b)?),
         )),
         TLExpr::Div(a, b) => Ok(LoweredOp::Div(
-            Box::new(from_tlexpr(a)?),
-            Box::new(from_tlexpr(b)?),
+            Arc::new(from_tlexpr(a)?),
+            Arc::new(from_tlexpr(b)?),
         )),
         TLExpr::Pow(a, b) => Ok(LoweredOp::Pow(
-            Box::new(from_tlexpr(a)?),
-            Box::new(from_tlexpr(b)?),
+            Arc::new(from_tlexpr(a)?),
+            Arc::new(from_tlexpr(b)?),
         )),
-        TLExpr::Exp(a) => Ok(LoweredOp::Exp(Box::new(from_tlexpr(a)?))),
-        TLExpr::Log(a) => Ok(LoweredOp::Ln(Box::new(from_tlexpr(a)?))),
-        TLExpr::Sin(a) => Ok(LoweredOp::Sin(Box::new(from_tlexpr(a)?))),
-        TLExpr::Cos(a) => Ok(LoweredOp::Cos(Box::new(from_tlexpr(a)?))),
-        TLExpr::Tan(a) => Ok(LoweredOp::Tan(Box::new(from_tlexpr(a)?))),
+        TLExpr::Exp(a) => Ok(LoweredOp::Exp(Arc::new(from_tlexpr(a)?))),
+        TLExpr::Log(a) => Ok(LoweredOp::Ln(Arc::new(from_tlexpr(a)?))),
+        TLExpr::Sin(a) => Ok(LoweredOp::Sin(Arc::new(from_tlexpr(a)?))),
+        TLExpr::Cos(a) => Ok(LoweredOp::Cos(Arc::new(from_tlexpr(a)?))),
+        TLExpr::Tan(a) => Ok(LoweredOp::Tan(Arc::new(from_tlexpr(a)?))),
         other => Err(EmlError::UnsupportedTlExpr(describe_variant(other))),
     }
 }

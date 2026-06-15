@@ -1,17 +1,18 @@
 //! Tests for grad_all, jacobian, hessian, and count_vars utilities.
 
 use oxieml::LoweredOp;
+use std::sync::Arc;
 
 /// Build `2·x0 + 3·x1`.
 fn linear_expr() -> LoweredOp {
     LoweredOp::Add(
-        Box::new(LoweredOp::Mul(
-            Box::new(LoweredOp::Const(2.0)),
-            Box::new(LoweredOp::Var(0)),
+        Arc::new(LoweredOp::Mul(
+            Arc::new(LoweredOp::Const(2.0)),
+            Arc::new(LoweredOp::Var(0)),
         )),
-        Box::new(LoweredOp::Mul(
-            Box::new(LoweredOp::Const(3.0)),
-            Box::new(LoweredOp::Var(1)),
+        Arc::new(LoweredOp::Mul(
+            Arc::new(LoweredOp::Const(3.0)),
+            Arc::new(LoweredOp::Var(1)),
         )),
     )
 }
@@ -64,11 +65,11 @@ fn jacobian_pads_with_zeros() {
 fn jacobian_truncates() {
     // f(x0, x1, x2) = x0 + x1 + x2; jacobian(2) has length 2
     let f = LoweredOp::Add(
-        Box::new(LoweredOp::Add(
-            Box::new(LoweredOp::Var(0)),
-            Box::new(LoweredOp::Var(1)),
+        Arc::new(LoweredOp::Add(
+            Arc::new(LoweredOp::Var(0)),
+            Arc::new(LoweredOp::Var(1)),
         )),
-        Box::new(LoweredOp::Var(2)),
+        Arc::new(LoweredOp::Var(2)),
     );
     assert_eq!(f.count_vars(), 3);
     let jac = f.jacobian(2);
@@ -79,19 +80,19 @@ fn jacobian_truncates() {
 fn hessian_symmetric() {
     // f(x0, x1) = x0^2 + x0·x1 + x1^2
     let f = LoweredOp::Add(
-        Box::new(LoweredOp::Add(
-            Box::new(LoweredOp::Pow(
-                Box::new(LoweredOp::Var(0)),
-                Box::new(LoweredOp::Const(2.0)),
+        Arc::new(LoweredOp::Add(
+            Arc::new(LoweredOp::Pow(
+                Arc::new(LoweredOp::Var(0)),
+                Arc::new(LoweredOp::Const(2.0)),
             )),
-            Box::new(LoweredOp::Mul(
-                Box::new(LoweredOp::Var(0)),
-                Box::new(LoweredOp::Var(1)),
+            Arc::new(LoweredOp::Mul(
+                Arc::new(LoweredOp::Var(0)),
+                Arc::new(LoweredOp::Var(1)),
             )),
         )),
-        Box::new(LoweredOp::Pow(
-            Box::new(LoweredOp::Var(1)),
-            Box::new(LoweredOp::Const(2.0)),
+        Arc::new(LoweredOp::Pow(
+            Arc::new(LoweredOp::Var(1)),
+            Arc::new(LoweredOp::Const(2.0)),
         )),
     );
     let h = f.hessian(2);
@@ -117,13 +118,13 @@ fn hessian_symmetric() {
 fn hessian_quadratic_correct() {
     // f(x0, x1) = x0^2 + x1^2; Hessian = [[2, 0], [0, 2]]
     let f = LoweredOp::Add(
-        Box::new(LoweredOp::Pow(
-            Box::new(LoweredOp::Var(0)),
-            Box::new(LoweredOp::Const(2.0)),
+        Arc::new(LoweredOp::Pow(
+            Arc::new(LoweredOp::Var(0)),
+            Arc::new(LoweredOp::Const(2.0)),
         )),
-        Box::new(LoweredOp::Pow(
-            Box::new(LoweredOp::Var(1)),
-            Box::new(LoweredOp::Const(2.0)),
+        Arc::new(LoweredOp::Pow(
+            Arc::new(LoweredOp::Var(1)),
+            Arc::new(LoweredOp::Const(2.0)),
         )),
     );
     let h = f.hessian(2);
@@ -142,10 +143,10 @@ fn hessian_quadratic_correct() {
 fn count_vars_correct() {
     // Var(3) in a tree → count_vars = 4
     let f = LoweredOp::Add(
-        Box::new(LoweredOp::Var(0)),
-        Box::new(LoweredOp::Mul(
-            Box::new(LoweredOp::Var(3)),
-            Box::new(LoweredOp::Const(2.0)),
+        Arc::new(LoweredOp::Var(0)),
+        Arc::new(LoweredOp::Mul(
+            Arc::new(LoweredOp::Var(3)),
+            Arc::new(LoweredOp::Const(2.0)),
         )),
     );
     assert_eq!(f.count_vars(), 4, "max var index is 3 → count = 4");
@@ -163,11 +164,11 @@ fn count_vars_correct() {
 fn grad_all_vs_individual() {
     // f(x0, x1) = sin(x0) * x1 + exp(x1)
     let f = LoweredOp::Add(
-        Box::new(LoweredOp::Mul(
-            Box::new(LoweredOp::Sin(Box::new(LoweredOp::Var(0)))),
-            Box::new(LoweredOp::Var(1)),
+        Arc::new(LoweredOp::Mul(
+            Arc::new(LoweredOp::Sin(Arc::new(LoweredOp::Var(0)))),
+            Arc::new(LoweredOp::Var(1)),
         )),
-        Box::new(LoweredOp::Exp(Box::new(LoweredOp::Var(1)))),
+        Arc::new(LoweredOp::Exp(Arc::new(LoweredOp::Var(1)))),
     );
 
     let grads_all = f.grad_all();

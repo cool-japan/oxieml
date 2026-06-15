@@ -15,6 +15,11 @@ pub enum EmlNode {
     /// Constant 1 (the only constant in the paper's grammar).
     One,
 
+    /// Free floating-point constant (activated when `SymRegConfig.enable_const_leaf = true`).
+    /// Not part of the base EML grammar; used during symbolic regression to represent
+    /// learnable constants that are later snapped to named constants.
+    Const(f64),
+
     /// Input variable referenced by index: x0, x1, ...
     Var(usize),
 
@@ -75,6 +80,19 @@ impl EmlTree {
         }
     }
 
+    /// Create a tree with a free constant leaf (active only when `SymRegConfig.enable_const_leaf = true`).
+    pub fn const_val(v: f64) -> Self {
+        Self {
+            root: Arc::new(EmlNode::Const(v)),
+            num_vars: 0,
+        }
+    }
+
+    /// Count `Const` leaves in the tree.
+    pub fn count_const_leaves(&self) -> usize {
+        count_const_in_node(&self.root)
+    }
+
     /// Number of distinct variables referenced.
     pub fn num_vars(&self) -> usize {
         self.num_vars
@@ -119,6 +137,7 @@ impl fmt::Display for EmlNode {
 fn write_node(node: &EmlNode, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match node {
         EmlNode::One => write!(f, "1"),
+        EmlNode::Const(v) => write!(f, "{v:.6}"),
         EmlNode::Var(i) => write!(f, "x{i}"),
         EmlNode::Eml { left, right } => {
             write!(f, "eml(")?;
@@ -163,21 +182,21 @@ fn collect_postorder<'a>(node: &'a EmlNode, out: &mut Vec<&'a EmlNode>) {
             collect_postorder(left, out);
             collect_postorder(right, out);
         }
-        EmlNode::One | EmlNode::Var(_) => {}
+        EmlNode::One | EmlNode::Var(_) | EmlNode::Const(_) => {}
     }
     out.push(node);
 }
 
 fn node_depth(node: &EmlNode) -> usize {
     match node {
-        EmlNode::One | EmlNode::Var(_) => 0,
+        EmlNode::One | EmlNode::Var(_) | EmlNode::Const(_) => 0,
         EmlNode::Eml { left, right } => 1 + node_depth(left).max(node_depth(right)),
     }
 }
 
 fn node_size(node: &EmlNode) -> usize {
     match node {
-        EmlNode::One | EmlNode::Var(_) => 1,
+        EmlNode::One | EmlNode::Var(_) | EmlNode::Const(_) => 1,
         EmlNode::Eml { left, right } => 1 + node_size(left) + node_size(right),
     }
 }
@@ -185,8 +204,17 @@ fn node_size(node: &EmlNode) -> usize {
 fn count_vars(node: &EmlNode) -> usize {
     match node {
         EmlNode::One => 0,
+        EmlNode::Const(_) => 0,
         EmlNode::Var(i) => i + 1,
         EmlNode::Eml { left, right } => count_vars(left).max(count_vars(right)),
+    }
+}
+
+fn count_const_in_node(node: &EmlNode) -> usize {
+    match node {
+        EmlNode::Const(_) => 1,
+        EmlNode::One | EmlNode::Var(_) => 0,
+        EmlNode::Eml { left, right } => count_const_in_node(left) + count_const_in_node(right),
     }
 }
 
@@ -273,5 +301,14 @@ mod tests {
         let outer = EmlTree::eml(&inner_l, &inner_r);
         assert_eq!(outer.depth(), 2);
         assert_eq!(outer.size(), 7);
+    }
+
+    #[test]
+    fn test_const_leaf() {
+        let c = EmlTree::const_val(3.7);
+        assert_eq!(c.depth(), 0);
+        assert_eq!(c.size(), 1);
+        assert_eq!(c.num_vars(), 0);
+        assert!(c.to_string().starts_with("3.7"));
     }
 }

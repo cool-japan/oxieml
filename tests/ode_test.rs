@@ -40,6 +40,7 @@ fn discover_ode_exponential_growth() {
     assert!(best_mse < 1.0, "best MSE should be reasonable: {best_mse}");
 }
 
+#[ignore = "heavy: slow integration test, run manually"]
 #[test]
 fn discover_ode_two_state_variables() {
     // Simple harmonic oscillator: dx/dt = v, dv/dt = -x

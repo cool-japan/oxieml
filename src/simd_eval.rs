@@ -7,7 +7,8 @@
 //! - **AArch64**: NEON `F64x2` (2 lanes) is always available; we also use `F64x4`
 //!   (emulated 4 lanes) if `detect_simd_level()` reports Simd256+ (future SVE).
 //! - **x86_64**: runtime dispatch via `detect_simd_level()`:
-//!   - `Simd256`/`Simd512` → `F64x4` (AVX2, 4 lanes)
+//!   - `Simd512` → `F64x8` (AVX-512, 8 lanes) if oxiblas-core exposes it
+//!   - `Simd256` → `F64x4` (AVX2, 4 lanes)
 //!   - `Simd128` → `F64x2Sse` (SSE, 2 lanes)
 //!   - `Scalar` → scalar fallback
 //! - **Other architectures**: scalar fallback.
@@ -15,8 +16,9 @@
 //! # Transcendental operations
 //!
 //! `oxiblas_core::simd::SimdRegister` does not expose `exp`/`ln`/`sin`/`cos`.
-//! For those ops we extract each lane to scalar, compute with `f64::exp()` etc.,
-//! then re-insert. Pure Rust, bit-exact, correct.
+//! `exp`, `ln`, `sin`, `cos`, and `tanh` use polynomial kernels from `crate::simd_vec_math`
+//! (degree-12 Horner, Cody-Waite range reduction) with relative error < 1e-11.
+//! Other transcendentals fall back to per-lane scalar extraction.
 
 use crate::lower::{LoweredOp, OxiOp};
 use oxiblas_core::simd::{SimdLevel, SimdRegister, detect_simd_level};
@@ -25,7 +27,7 @@ use oxiblas_core::simd::{SimdLevel, SimdRegister, detect_simd_level};
 use oxiblas_core::simd::aarch64::{F64x2, F64x4 as F64x4Aarch};
 
 #[cfg(target_arch = "x86_64")]
-use oxiblas_core::simd::x86_64::{F64x2Sse, F64x4};
+use oxiblas_core::simd::x86_64::{F64x2Sse, F64x4, F64x8};
 
 /// Minimum number of data rows before activating rayon parallelism (simd+parallel).
 #[cfg(feature = "parallel")]
@@ -54,7 +56,8 @@ pub fn eval_batch_simd(ops: &[OxiOp], data: &[Vec<f64>]) -> Vec<f64> {
     #[cfg(target_arch = "x86_64")]
     {
         match detect_simd_level() {
-            SimdLevel::Simd256 | SimdLevel::Simd512 => eval_chunks_dispatch::<F64x4>(ops, data),
+            SimdLevel::Simd512 => eval_chunks_dispatch::<F64x8>(ops, data),
+            SimdLevel::Simd256 => eval_chunks_dispatch::<F64x4>(ops, data),
             SimdLevel::Simd128 => eval_chunks_dispatch::<F64x2Sse>(ops, data),
             SimdLevel::Scalar => LoweredOp::eval_batch_scalar_from_ops(ops, data),
         }
@@ -114,6 +117,16 @@ where
 {
     let lanes = V::LANES;
     let mut stack: Vec<V> = Vec::with_capacity(ops.len());
+    // Derive n_slots from the ops sequence — avoids cascading API churn.
+    let n_slots = ops
+        .iter()
+        .filter_map(|op| match op {
+            OxiOp::Store(k) | OxiOp::Load(k) => Some(*k + 1),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut slots: Vec<V> = vec![V::splat(f64::NAN); n_slots];
 
     for op in ops {
         match op {
@@ -152,35 +165,19 @@ where
             }
             OxiOp::Exp => {
                 let a = stack.pop().unwrap_or_else(V::zero);
-                let mut reg = V::zero();
-                for lane in 0..lanes {
-                    reg = reg.insert(lane, a.extract(lane).exp());
-                }
-                stack.push(reg);
+                stack.push(crate::simd_vec_math::simd_exp(a));
             }
             OxiOp::Ln => {
                 let a = stack.pop().unwrap_or_else(V::zero);
-                let mut reg = V::zero();
-                for lane in 0..lanes {
-                    reg = reg.insert(lane, a.extract(lane).ln());
-                }
-                stack.push(reg);
+                stack.push(crate::simd_vec_math::simd_ln(a));
             }
             OxiOp::Sin => {
                 let a = stack.pop().unwrap_or_else(V::zero);
-                let mut reg = V::zero();
-                for lane in 0..lanes {
-                    reg = reg.insert(lane, a.extract(lane).sin());
-                }
-                stack.push(reg);
+                stack.push(crate::simd_vec_math::simd_sin(a));
             }
             OxiOp::Cos => {
                 let a = stack.pop().unwrap_or_else(V::zero);
-                let mut reg = V::zero();
-                for lane in 0..lanes {
-                    reg = reg.insert(lane, a.extract(lane).cos());
-                }
-                stack.push(reg);
+                stack.push(crate::simd_vec_math::simd_cos(a));
             }
             OxiOp::Pow => {
                 let b = stack.pop().unwrap_or_else(V::zero);
@@ -217,11 +214,7 @@ where
             }
             OxiOp::Tanh => {
                 let a = stack.pop().unwrap_or_else(V::zero);
-                let mut reg = V::zero();
-                for lane in 0..lanes {
-                    reg = reg.insert(lane, a.extract(lane).tanh());
-                }
-                stack.push(reg);
+                stack.push(crate::simd_vec_math::simd_tanh(a));
             }
             OxiOp::Arcsin => {
                 let a = stack.pop().unwrap_or_else(V::zero);
@@ -271,6 +264,73 @@ where
                 }
                 stack.push(reg);
             }
+            OxiOp::Erf => {
+                let a = stack.pop().unwrap_or_else(V::zero);
+                let mut reg = V::zero();
+                for lane in 0..lanes {
+                    reg = reg.insert(lane, crate::special::erf(a.extract(lane)));
+                }
+                stack.push(reg);
+            }
+            OxiOp::LGamma => {
+                let a = stack.pop().unwrap_or_else(V::zero);
+                let mut reg = V::zero();
+                for lane in 0..lanes {
+                    reg = reg.insert(lane, crate::special::lgamma(a.extract(lane)));
+                }
+                stack.push(reg);
+            }
+            OxiOp::Digamma => {
+                let a = stack.pop().unwrap_or_else(V::zero);
+                let mut reg = V::zero();
+                for lane in 0..lanes {
+                    reg = reg.insert(lane, crate::special::digamma(a.extract(lane)));
+                }
+                stack.push(reg);
+            }
+            OxiOp::Trigamma => {
+                let a = stack.pop().unwrap_or_else(V::zero);
+                let mut reg = V::zero();
+                for lane in 0..lanes {
+                    reg = reg.insert(lane, crate::special::trigamma(a.extract(lane)));
+                }
+                stack.push(reg);
+            }
+            OxiOp::Ei => {
+                let a = stack.pop().unwrap_or_else(V::zero);
+                let mut reg = V::zero();
+                for lane in 0..lanes {
+                    reg = reg.insert(lane, crate::special::ei(a.extract(lane)));
+                }
+                stack.push(reg);
+            }
+            OxiOp::Si => {
+                let a = stack.pop().unwrap_or_else(V::zero);
+                let mut reg = V::zero();
+                for lane in 0..lanes {
+                    reg = reg.insert(lane, crate::special::si(a.extract(lane)));
+                }
+                stack.push(reg);
+            }
+            OxiOp::Ci => {
+                let a = stack.pop().unwrap_or_else(V::zero);
+                let mut reg = V::zero();
+                for lane in 0..lanes {
+                    reg = reg.insert(lane, crate::special::ci(a.extract(lane)));
+                }
+                stack.push(reg);
+            }
+            OxiOp::Store(k) => {
+                // Peek top of SIMD stack into slot k (does NOT pop).
+                let top = stack.last().copied().unwrap_or_else(|| V::splat(f64::NAN));
+                if let Some(slot) = slots.get_mut(*k) {
+                    *slot = top;
+                }
+            }
+            OxiOp::Load(k) => {
+                let v = slots.get(*k).copied().unwrap_or_else(|| V::splat(f64::NAN));
+                stack.push(v);
+            }
         }
     }
 
@@ -315,7 +375,7 @@ mod tests {
         assert_eq!(simd_results.len(), scalar_results.len());
         for (i, (s, r)) in simd_results.iter().zip(scalar_results.iter()).enumerate() {
             assert!(
-                (s - r).abs() < 1e-12,
+                (s - r).abs() < 1e-11,
                 "row {i}: SIMD={s} scalar={r} diff={}",
                 (s - r).abs()
             );
@@ -327,8 +387,8 @@ mod tests {
         use crate::lower::LoweredOp as L;
         // sin(x) + cos(x) built directly as LoweredOp
         let lowered = L::Add(
-            Box::new(L::Sin(Box::new(L::Var(0)))),
-            Box::new(L::Cos(Box::new(L::Var(0)))),
+            std::sync::Arc::new(L::Sin(std::sync::Arc::new(L::Var(0)))),
+            std::sync::Arc::new(L::Cos(std::sync::Arc::new(L::Var(0)))),
         );
         let ops = lowered.to_oxiblas_ops();
         let data: Vec<Vec<f64>> = (0..128).map(|i| vec![i as f64 * 0.05]).collect();
@@ -338,9 +398,13 @@ mod tests {
 
         assert_eq!(simd_results.len(), 128);
         for (i, (s, r)) in simd_results.iter().zip(scalar_results.iter()).enumerate() {
+            // Polynomial kernels have ~1e-11 relative error vs f64::sin/cos.
+            // Near-cancellation zones (where sin(x)+cos(x)≈0) amplify relative error;
+            // use absolute error tolerance of 2e-10 (≈ ULP budget for the sum).
             assert!(
-                (s - r).abs() < 1e-12,
-                "sin+cos row {i}: SIMD={s} scalar={r}"
+                (s - r).abs() < 2e-10,
+                "sin+cos row {i}: SIMD={s} scalar={r} abs_err={}",
+                (s - r).abs()
             );
         }
     }
@@ -356,7 +420,7 @@ mod tests {
 
         assert_eq!(simd_results.len(), 7);
         for (i, (s, r)) in simd_results.iter().zip(scalar_results.iter()).enumerate() {
-            assert!((s - r).abs() < 1e-12, "remainder row {i}: {s} vs {r}");
+            assert!((s - r).abs() < 1e-11, "remainder row {i}: {s} vs {r}");
         }
     }
 
@@ -380,7 +444,7 @@ mod tests {
 
         assert_eq!(simd_results.len(), 1000);
         for (i, (s, r)) in simd_results.iter().zip(scalar_results.iter()).enumerate() {
-            assert!((s - r).abs() < 1e-12, "parallel row {i}: {s} vs {r}");
+            assert!((s - r).abs() < 1e-11, "parallel row {i}: {s} vs {r}");
         }
     }
 }

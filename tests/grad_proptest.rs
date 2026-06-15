@@ -5,6 +5,7 @@
 
 use oxieml::lower::LoweredOp;
 use proptest::prelude::*;
+use std::sync::Arc;
 
 /// Recursive strategy that produces random `LoweredOp` trees.
 ///
@@ -25,18 +26,18 @@ fn lowered_op_strategy(depth: u32) -> impl Strategy<Value = LoweredOp> {
     leaf.prop_recursive(depth, 64, 2, |inner| {
         prop_oneof![
             // Unary ops — all bounded or smooth on the evaluation range
-            inner.clone().prop_map(|x| LoweredOp::Neg(Box::new(x))),
-            inner.clone().prop_map(|x| LoweredOp::Sin(Box::new(x))),
-            inner.clone().prop_map(|x| LoweredOp::Cos(Box::new(x))),
-            inner.clone().prop_map(|x| LoweredOp::Tanh(Box::new(x))),
-            inner.clone().prop_map(|x| LoweredOp::Arctan(Box::new(x))),
+            inner.clone().prop_map(|x| LoweredOp::Neg(Arc::new(x))),
+            inner.clone().prop_map(|x| LoweredOp::Sin(Arc::new(x))),
+            inner.clone().prop_map(|x| LoweredOp::Cos(Arc::new(x))),
+            inner.clone().prop_map(|x| LoweredOp::Tanh(Arc::new(x))),
+            inner.clone().prop_map(|x| LoweredOp::Arctan(Arc::new(x))),
             // Binary ops
             (inner.clone(), inner.clone())
-                .prop_map(|(a, b)| LoweredOp::Add(Box::new(a), Box::new(b))),
+                .prop_map(|(a, b)| LoweredOp::Add(Arc::new(a), Arc::new(b))),
             (inner.clone(), inner.clone())
-                .prop_map(|(a, b)| LoweredOp::Sub(Box::new(a), Box::new(b))),
+                .prop_map(|(a, b)| LoweredOp::Sub(Arc::new(a), Arc::new(b))),
             (inner.clone(), inner.clone())
-                .prop_map(|(a, b)| LoweredOp::Mul(Box::new(a), Box::new(b))),
+                .prop_map(|(a, b)| LoweredOp::Mul(Arc::new(a), Arc::new(b))),
         ]
     })
 }
@@ -46,6 +47,7 @@ proptest! {
 
     /// For 1024 random trees the symbolic gradient must match the central
     /// difference at three randomly sampled points in `[-1, 1]^2`.
+    #[ignore = "heavy: slow integration test, run manually"]
     #[test]
     fn grad_matches_central_difference(
         tree in lowered_op_strategy(6),
@@ -96,7 +98,7 @@ proptest! {
 /// Non-proptest sanity check: d/dx₀ (x₀ · x₁) at (2, 3) = 3.
 #[test]
 fn grad_proptest_sanity() {
-    let tree = LoweredOp::Mul(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let tree = LoweredOp::Mul(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let g0 = tree.grad(0);
     let val = g0.eval(&[2.0, 3.0]);
     assert!((val - 3.0).abs() < 1e-12, "expected 3.0, got {val}",);

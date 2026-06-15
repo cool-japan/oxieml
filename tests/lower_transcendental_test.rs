@@ -3,6 +3,7 @@
 
 use oxieml::lower::{LoweredOp, OxiOp};
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Helper: compute structural hash of a LoweredOp as u64.
@@ -20,7 +21,7 @@ fn struct_hash(op: &LoweredOp) -> u64 {
 // ---------------------------------------------------------------------------
 #[test]
 fn eval_tan_matches_std() {
-    let op = LoweredOp::Tan(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Tan(Arc::new(LoweredOp::Var(0)));
     let n = 10usize;
     for i in 0..n {
         let x = -PI / 4.0 + (PI / 2.0) * (i as f64) / (n as f64 - 1.0);
@@ -38,9 +39,9 @@ fn eval_tan_matches_std() {
 // ---------------------------------------------------------------------------
 #[test]
 fn eval_sinh_cosh_tanh_matches_std() {
-    let sinh_op = LoweredOp::Sinh(Box::new(LoweredOp::Var(0)));
-    let cosh_op = LoweredOp::Cosh(Box::new(LoweredOp::Var(0)));
-    let tanh_op = LoweredOp::Tanh(Box::new(LoweredOp::Var(0)));
+    let sinh_op = LoweredOp::Sinh(Arc::new(LoweredOp::Var(0)));
+    let cosh_op = LoweredOp::Cosh(Arc::new(LoweredOp::Var(0)));
+    let tanh_op = LoweredOp::Tanh(Arc::new(LoweredOp::Var(0)));
     let n = 10usize;
     for i in 0..n {
         let x = -2.0 + 4.0 * (i as f64) / (n as f64 - 1.0);
@@ -74,9 +75,9 @@ fn eval_sinh_cosh_tanh_matches_std() {
 // ---------------------------------------------------------------------------
 #[test]
 fn eval_arcsin_arccos_arctan_matches_std() {
-    let arcsin_op = LoweredOp::Arcsin(Box::new(LoweredOp::Var(0)));
-    let arccos_op = LoweredOp::Arccos(Box::new(LoweredOp::Var(0)));
-    let arctan_op = LoweredOp::Arctan(Box::new(LoweredOp::Var(0)));
+    let arcsin_op = LoweredOp::Arcsin(Arc::new(LoweredOp::Var(0)));
+    let arccos_op = LoweredOp::Arccos(Arc::new(LoweredOp::Var(0)));
+    let arctan_op = LoweredOp::Arctan(Arc::new(LoweredOp::Var(0)));
     let n = 10usize;
     for i in 0..n {
         let x = -0.9 + 1.8 * (i as f64) / (n as f64 - 1.0);
@@ -110,9 +111,9 @@ fn eval_arcsin_arccos_arctan_matches_std() {
 // ---------------------------------------------------------------------------
 #[test]
 fn eval_arcsinh_arccosh_arctanh_matches_std() {
-    let arcsinh_op = LoweredOp::Arcsinh(Box::new(LoweredOp::Var(0)));
-    let arccosh_op = LoweredOp::Arccosh(Box::new(LoweredOp::Var(0)));
-    let arctanh_op = LoweredOp::Arctanh(Box::new(LoweredOp::Var(0)));
+    let arcsinh_op = LoweredOp::Arcsinh(Arc::new(LoweredOp::Var(0)));
+    let arccosh_op = LoweredOp::Arccosh(Arc::new(LoweredOp::Var(0)));
+    let arctanh_op = LoweredOp::Arctanh(Arc::new(LoweredOp::Var(0)));
 
     // arcsinh over [-2, 2]
     let n = 10usize;
@@ -154,7 +155,7 @@ fn eval_arcsinh_arccosh_arctanh_matches_std() {
 // ---------------------------------------------------------------------------
 #[test]
 fn grad_tan_central_diff() {
-    let op = LoweredOp::Tan(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Tan(Arc::new(LoweredOp::Var(0)));
     let x = 0.3_f64;
     let h = 1e-5;
     let numerical = (op.eval(&[x + h]) - op.eval(&[x - h])) / (2.0 * h);
@@ -170,7 +171,7 @@ fn grad_tan_central_diff() {
 // ---------------------------------------------------------------------------
 #[test]
 fn grad_sinh_central_diff() {
-    let op = LoweredOp::Sinh(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Sinh(Arc::new(LoweredOp::Var(0)));
     let x = 0.5_f64;
     let h = 1e-5;
     let numerical = (op.eval(&[x + h]) - op.eval(&[x - h])) / (2.0 * h);
@@ -186,7 +187,7 @@ fn grad_sinh_central_diff() {
 // ---------------------------------------------------------------------------
 #[test]
 fn grad_tanh_central_diff() {
-    let op = LoweredOp::Tanh(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Tanh(Arc::new(LoweredOp::Var(0)));
     let x = 0.5_f64;
     let h = 1e-5;
     let numerical = (op.eval(&[x + h]) - op.eval(&[x - h])) / (2.0 * h);
@@ -202,7 +203,7 @@ fn grad_tanh_central_diff() {
 // ---------------------------------------------------------------------------
 #[test]
 fn grad_arctan_central_diff() {
-    let op = LoweredOp::Arctan(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Arctan(Arc::new(LoweredOp::Var(0)));
     let x = 0.5_f64;
     let h = 1e-5;
     let numerical = (op.eval(&[x + h]) - op.eval(&[x - h])) / (2.0 * h);
@@ -218,7 +219,7 @@ fn grad_arctan_central_diff() {
 // ---------------------------------------------------------------------------
 #[test]
 fn grad_arctanh_central_diff() {
-    let op = LoweredOp::Arctanh(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Arctanh(Arc::new(LoweredOp::Var(0)));
     let x = 0.3_f64;
     let h = 1e-5;
     let numerical = (op.eval(&[x + h]) - op.eval(&[x - h])) / (2.0 * h);
@@ -234,8 +235,8 @@ fn grad_arctanh_central_diff() {
 // ---------------------------------------------------------------------------
 #[test]
 fn simplify_tan_arctan_collapses() {
-    let inner = LoweredOp::Arctan(Box::new(LoweredOp::Var(0)));
-    let op = LoweredOp::Tan(Box::new(inner));
+    let inner = LoweredOp::Arctan(Arc::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Tan(Arc::new(inner));
     let simplified = op.simplify();
     assert_eq!(
         simplified,
@@ -249,8 +250,8 @@ fn simplify_tan_arctan_collapses() {
 // ---------------------------------------------------------------------------
 #[test]
 fn simplify_tanh_arctanh_collapses() {
-    let inner = LoweredOp::Arctanh(Box::new(LoweredOp::Var(0)));
-    let op = LoweredOp::Tanh(Box::new(inner));
+    let inner = LoweredOp::Arctanh(Arc::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Tanh(Arc::new(inner));
     let simplified = op.simplify();
     assert_eq!(
         simplified,
@@ -264,7 +265,7 @@ fn simplify_tanh_arctanh_collapses() {
 // ---------------------------------------------------------------------------
 #[test]
 fn to_pretty_golden() {
-    let op = LoweredOp::Tan(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Tan(Arc::new(LoweredOp::Var(0)));
     let pretty = op.to_pretty();
     // Display uses "x0" for Var(0) — not unicode subscript
     assert_eq!(pretty, "tan(x0)", "expected 'tan(x0)', got '{pretty}'");
@@ -275,7 +276,7 @@ fn to_pretty_golden() {
 // ---------------------------------------------------------------------------
 #[test]
 fn to_latex_golden() {
-    let op = LoweredOp::Sinh(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Sinh(Arc::new(LoweredOp::Var(0)));
     let latex = op.to_latex();
     assert_eq!(
         latex, r"\sinh{x_{0}}",
@@ -288,7 +289,7 @@ fn to_latex_golden() {
 // ---------------------------------------------------------------------------
 #[test]
 fn oxiop_emission_parity() {
-    let op = LoweredOp::Tan(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Tan(Arc::new(LoweredOp::Var(0)));
     let ops = op.to_oxiblas_ops();
     assert!(
         ops.contains(&OxiOp::Tan),
@@ -303,13 +304,13 @@ fn oxiop_emission_parity() {
 fn canonical_recognizer_tan() {
     // Build Div(Sin(Var(0)), Cos(Var(0))) and simplify — should become Tan(Var(0))
     let div_op = LoweredOp::Div(
-        Box::new(LoweredOp::Sin(Box::new(LoweredOp::Var(0)))),
-        Box::new(LoweredOp::Cos(Box::new(LoweredOp::Var(0)))),
+        Arc::new(LoweredOp::Sin(Arc::new(LoweredOp::Var(0)))),
+        Arc::new(LoweredOp::Cos(Arc::new(LoweredOp::Var(0)))),
     );
     let simplified = div_op.simplify();
     assert_eq!(
         simplified,
-        LoweredOp::Tan(Box::new(LoweredOp::Var(0))),
+        LoweredOp::Tan(Arc::new(LoweredOp::Var(0))),
         "Div(Sin(x), Cos(x)).simplify() should give Tan(x), got {simplified:?}"
     );
 }
@@ -320,15 +321,15 @@ fn canonical_recognizer_tan() {
 #[test]
 fn canonical_recognizer_sinh() {
     // Build (exp(x) - exp(-x)) / 2 and check structural hash equals Sinh(x)
-    let x = Box::new(LoweredOp::Var(0));
+    let x = Arc::new(LoweredOp::Var(0));
     let exp_x = LoweredOp::Exp(x.clone());
     let neg_x = LoweredOp::Neg(x);
-    let exp_neg_x = LoweredOp::Exp(Box::new(neg_x));
-    let sub = LoweredOp::Sub(Box::new(exp_x), Box::new(exp_neg_x));
-    let div = LoweredOp::Div(Box::new(sub), Box::new(LoweredOp::Const(2.0)));
+    let exp_neg_x = LoweredOp::Exp(Arc::new(neg_x));
+    let sub = LoweredOp::Sub(Arc::new(exp_x), Arc::new(exp_neg_x));
+    let div = LoweredOp::Div(Arc::new(sub), Arc::new(LoweredOp::Const(2.0)));
 
     let simplified = div.simplify();
-    let expected = LoweredOp::Sinh(Box::new(LoweredOp::Var(0)));
+    let expected = LoweredOp::Sinh(Arc::new(LoweredOp::Var(0)));
 
     assert_eq!(
         struct_hash(&simplified),

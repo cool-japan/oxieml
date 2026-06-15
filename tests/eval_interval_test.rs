@@ -1,6 +1,7 @@
 //! Tests for IntervalLO and LoweredOp::eval_interval.
 
 use oxieml::{IntervalLO, LoweredOp};
+use std::sync::Arc;
 
 /// Create an interval for a variable binding.
 fn iv(lo: f64, hi: f64) -> IntervalLO {
@@ -10,7 +11,7 @@ fn iv(lo: f64, hi: f64) -> IntervalLO {
 #[test]
 fn containment_add() {
     // Add(Var(0), Var(1)) over [1,2] × [3,4]
-    let expr = LoweredOp::Add(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let expr = LoweredOp::Add(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let ivar = [iv(1.0, 2.0), iv(3.0, 4.0)];
     let result = expr.eval_interval(&ivar);
 
@@ -28,7 +29,7 @@ fn containment_add() {
 #[test]
 fn containment_mul() {
     // Mul(Var(0), Var(1)) over [-2, 3] × [-1, 4] (mixed signs)
-    let expr = LoweredOp::Mul(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let expr = LoweredOp::Mul(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let ivar = [iv(-2.0, 3.0), iv(-1.0, 4.0)];
     let result = expr.eval_interval(&ivar);
 
@@ -51,7 +52,7 @@ fn containment_mul() {
 #[test]
 fn containment_sin() {
     // Sin(Var(0)) over [-π, π]
-    let expr = LoweredOp::Sin(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Sin(Arc::new(LoweredOp::Var(0)));
     let pi = std::f64::consts::PI;
     let ivar = [iv(-pi, pi)];
     let result = expr.eval_interval(&ivar);
@@ -72,7 +73,7 @@ fn containment_sin() {
 #[test]
 fn sin_full_period_returns_unit_interval() {
     // Sin(Var(0)) over [-4π, 4π]: width ≥ 2π → [-1, 1]
-    let expr = LoweredOp::Sin(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Sin(Arc::new(LoweredOp::Var(0)));
     let pi = std::f64::consts::PI;
     let ivar = [iv(-4.0 * pi, 4.0 * pi)];
     let result = expr.eval_interval(&ivar);
@@ -91,7 +92,7 @@ fn sin_full_period_returns_unit_interval() {
 #[test]
 fn containment_cos() {
     // Cos(Var(0)) over [0, π]
-    let expr = LoweredOp::Cos(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Cos(Arc::new(LoweredOp::Var(0)));
     let pi = std::f64::consts::PI;
     let ivar = [iv(0.0, pi)];
     let result = expr.eval_interval(&ivar);
@@ -117,7 +118,7 @@ fn containment_cos() {
 #[test]
 fn tan_asymptote_returns_full() {
     // Tan(Var(0)) over [0, π]: contains π/2 (asymptote) → [-∞, +∞]
-    let expr = LoweredOp::Tan(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Tan(Arc::new(LoweredOp::Var(0)));
     let pi = std::f64::consts::PI;
     let ivar = [iv(0.0, pi)];
     let result = expr.eval_interval(&ivar);
@@ -130,7 +131,7 @@ fn tan_asymptote_returns_full() {
 #[test]
 fn tan_monotone_branch() {
     // Tan(Var(0)) over [-π/4, π/4]: no asymptote → bounded
-    let expr = LoweredOp::Tan(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Tan(Arc::new(LoweredOp::Var(0)));
     let pi = std::f64::consts::PI;
     let ivar = [iv(-pi / 4.0, pi / 4.0)];
     let result = expr.eval_interval(&ivar);
@@ -151,7 +152,7 @@ fn tan_monotone_branch() {
 #[test]
 fn containment_exp() {
     // Exp(Var(0)) over [-2, 2]: monotone, check several points
-    let expr = LoweredOp::Exp(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Exp(Arc::new(LoweredOp::Var(0)));
     let ivar = [iv(-2.0, 2.0)];
     let result = expr.eval_interval(&ivar);
 
@@ -168,7 +169,7 @@ fn containment_exp() {
 #[test]
 fn containment_sinh_cosh_tanh() {
     // Sinh(Var(0)) point at x=1.0 → [sinh(1), sinh(1)]
-    let sinh_expr = LoweredOp::Sinh(Box::new(LoweredOp::Var(0)));
+    let sinh_expr = LoweredOp::Sinh(Arc::new(LoweredOp::Var(0)));
     let sinh_iv = [IntervalLO::point(1.0)];
     let sinh_result = sinh_expr.eval_interval(&sinh_iv);
     let expected_sinh = 1.0_f64.sinh();
@@ -178,7 +179,7 @@ fn containment_sinh_cosh_tanh() {
     );
 
     // Cosh(Var(0)) at point 0.5
-    let cosh_expr = LoweredOp::Cosh(Box::new(LoweredOp::Var(0)));
+    let cosh_expr = LoweredOp::Cosh(Arc::new(LoweredOp::Var(0)));
     let cosh_iv = [IntervalLO::point(0.5)];
     let cosh_result = cosh_expr.eval_interval(&cosh_iv);
     let expected_cosh = 0.5_f64.cosh();
@@ -188,7 +189,7 @@ fn containment_sinh_cosh_tanh() {
     );
 
     // Tanh(Var(0)) at point -1.5
-    let tanh_expr = LoweredOp::Tanh(Box::new(LoweredOp::Var(0)));
+    let tanh_expr = LoweredOp::Tanh(Arc::new(LoweredOp::Var(0)));
     let tanh_iv = [IntervalLO::point(-1.5)];
     let tanh_result = tanh_expr.eval_interval(&tanh_iv);
     let expected_tanh = (-1.5_f64).tanh();
@@ -201,7 +202,7 @@ fn containment_sinh_cosh_tanh() {
 #[test]
 fn arccosh_below_one_is_nan() {
     // Arccosh(Var(0)) over [0.0, 0.5]: domain requires x ≥ 1, so result is NaN
-    let expr = LoweredOp::Arccosh(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Arccosh(Arc::new(LoweredOp::Var(0)));
     let ivar = [iv(0.0, 0.5)];
     let result = expr.eval_interval(&ivar);
     assert!(

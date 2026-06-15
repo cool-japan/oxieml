@@ -17,12 +17,26 @@ use crate::tree::{EmlNode, EmlTree};
 /// Follows the Catalan-number-based enumeration of binary trees.
 pub fn enumerate_topologies(max_depth: usize, num_vars: usize) -> Vec<EmlTree> {
     let mut topologies = Vec::new();
-    let leaves = build_leaves(num_vars);
+    let leaves = build_leaves(num_vars, None);
 
     for depth in 0..=max_depth {
         enumerate_at_depth(depth, &leaves, &mut topologies);
     }
 
+    topologies
+}
+
+/// Enumerate topologies with optional `Const` leaf (activated by `enable_const_leaf`).
+pub(super) fn enumerate_topologies_gated(
+    max_depth: usize,
+    num_vars: usize,
+    const_leaf: Option<f64>,
+) -> Vec<EmlTree> {
+    let mut topologies = Vec::new();
+    let leaves = build_leaves(num_vars, const_leaf);
+    for depth in 0..=max_depth {
+        enumerate_at_depth(depth, &leaves, &mut topologies);
+    }
     topologies
 }
 
@@ -60,10 +74,13 @@ pub fn dedupe_by_semantics(topologies: Vec<EmlTree>) -> Vec<EmlTree> {
 }
 
 /// Build leaf nodes: One and Var(0), Var(1), ...
-pub(super) fn build_leaves(num_vars: usize) -> Vec<Arc<EmlNode>> {
+pub(super) fn build_leaves(num_vars: usize, const_leaf: Option<f64>) -> Vec<Arc<EmlNode>> {
     let mut leaves = vec![Arc::new(EmlNode::One)];
     for i in 0..num_vars {
         leaves.push(Arc::new(EmlNode::Var(i)));
+    }
+    if let Some(v) = const_leaf {
+        leaves.push(Arc::new(EmlNode::Const(v)));
     }
     leaves
 }
@@ -393,6 +410,13 @@ pub(super) fn topology_interval_feasible(
                 let mul_hi = p.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 IntervalLO::new(mul_lo.exp(), mul_hi.min(709.0).exp())
             }
+            LoweredOp::Erf(_) => IntervalLO::new(-1.0, 1.0),
+            LoweredOp::LGamma(_)
+            | LoweredOp::Digamma(_)
+            | LoweredOp::Trigamma(_)
+            | LoweredOp::Ei(_)
+            | LoweredOp::Si(_)
+            | LoweredOp::Ci(_) => IntervalLO::full(),
         }
     }
 

@@ -8,6 +8,7 @@
 use crate::lower::LoweredOp;
 use crate::named_const::NamedConst;
 use crate::tree::EmlTree;
+use std::sync::Arc;
 
 /// Bake learned parameters into a lowered operation tree.
 ///
@@ -35,113 +36,108 @@ use crate::tree::EmlTree;
 /// This is adequate for the constants-extraction use-case, where we scan
 /// all `Const` positions regardless of their origin.
 pub(super) fn bake_params_into_lowered(topology: &EmlTree, params: &[f64]) -> LoweredOp {
-    use crate::grad::ParameterizedEmlTree;
-
     if params.is_empty() {
         return topology.lower();
     }
 
-    // Build a parameterized tree and substitute params into the lowered form.
-    // We walk the EML node tree, building a modified version where each
-    // EmlNode::One is replaced by a Const with the corresponding param value.
-    let mut param_idx = 0usize;
-    let ptree = ParameterizedEmlTree::from_topology(topology, 1.0);
-    // Verify param count matches
-    if ptree.params.len() != params.len() {
-        return topology.lower();
+    // If the topology has Const leaves, use the substitute-first approach which
+    // correctly handles both One and Const as parameters.
+    // When no Const leaves exist (the common case), use the legacy approach
+    // to preserve bit-identical behavior.
+    if topology.count_const_leaves() > 0 {
+        let mut idx = 0usize;
+        let new_root = substitute_params(&topology.root, params, &mut idx);
+        let new_tree = EmlTree::from_node(new_root);
+        return new_tree.lower();
     }
 
-    // Walk the EML node tree, substituting Ones with param values, then lower.
-    fn substitute_ones(
-        node: &crate::tree::EmlNode,
-        params: &[f64],
-        idx: &mut usize,
-    ) -> std::sync::Arc<crate::tree::EmlNode> {
-        use crate::tree::EmlNode;
-        match node {
-            EmlNode::One => {
-                // Replace One with Var(MAX-1) as a sentinel carrying the param value.
-                // Since EmlNode has no Const variant, we keep One but track the mapping.
-                // The substitution happens post-lowering via replace_const_one below.
-                let _p = params[*idx];
-                *idx += 1;
-                std::sync::Arc::new(EmlNode::One)
-            }
-            EmlNode::Var(i) => std::sync::Arc::new(EmlNode::Var(*i)),
-            EmlNode::Eml { left, right } => {
-                let l = substitute_ones(left, params, idx);
-                let r = substitute_ones(right, params, idx);
-                std::sync::Arc::new(EmlNode::Eml { left: l, right: r })
-            }
-        }
-    }
-
-    // Strategy B (simplified): lower the topology, then walk the lowered tree
-    // and replace Const(1.0) nodes with their corresponding param values.
-    // We enumerate Const(1.0) positions in post-order to match the One-node
-    // post-order traversal order used in ParameterizedEmlTree.
+    // Legacy path: lower first, then substitute Const(1.0) with param values.
     let lowered = topology.lower();
+    let mut param_idx = 0usize;
+    replace_const_one(&lowered, params, &mut param_idx)
+}
 
-    fn replace_const_one(op: &LoweredOp, params: &[f64], idx: &mut usize) -> LoweredOp {
-        match op {
-            LoweredOp::Const(c) if (*c - 1.0).abs() < 1e-15 => {
-                if *idx < params.len() {
-                    let p = params[*idx];
-                    *idx += 1;
-                    LoweredOp::Const(p)
-                } else {
-                    op.clone()
-                }
-            }
-            LoweredOp::Const(_) | LoweredOp::Var(_) | LoweredOp::NamedConst(_) => op.clone(),
-            LoweredOp::Neg(a) => LoweredOp::Neg(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Exp(a) => LoweredOp::Exp(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Ln(a) => LoweredOp::Ln(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Sin(a) => LoweredOp::Sin(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Cos(a) => LoweredOp::Cos(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Tan(a) => LoweredOp::Tan(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Sinh(a) => LoweredOp::Sinh(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Cosh(a) => LoweredOp::Cosh(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Tanh(a) => LoweredOp::Tanh(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Arcsin(a) => LoweredOp::Arcsin(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Arccos(a) => LoweredOp::Arccos(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Arctan(a) => LoweredOp::Arctan(Box::new(replace_const_one(a, params, idx))),
-            LoweredOp::Arcsinh(a) => {
-                LoweredOp::Arcsinh(Box::new(replace_const_one(a, params, idx)))
-            }
-            LoweredOp::Arccosh(a) => {
-                LoweredOp::Arccosh(Box::new(replace_const_one(a, params, idx)))
-            }
-            LoweredOp::Arctanh(a) => {
-                LoweredOp::Arctanh(Box::new(replace_const_one(a, params, idx)))
-            }
-            LoweredOp::Add(a, b) => LoweredOp::Add(
-                Box::new(replace_const_one(a, params, idx)),
-                Box::new(replace_const_one(b, params, idx)),
-            ),
-            LoweredOp::Sub(a, b) => LoweredOp::Sub(
-                Box::new(replace_const_one(a, params, idx)),
-                Box::new(replace_const_one(b, params, idx)),
-            ),
-            LoweredOp::Mul(a, b) => LoweredOp::Mul(
-                Box::new(replace_const_one(a, params, idx)),
-                Box::new(replace_const_one(b, params, idx)),
-            ),
-            LoweredOp::Div(a, b) => LoweredOp::Div(
-                Box::new(replace_const_one(a, params, idx)),
-                Box::new(replace_const_one(b, params, idx)),
-            ),
-            LoweredOp::Pow(a, b) => LoweredOp::Pow(
-                Box::new(replace_const_one(a, params, idx)),
-                Box::new(replace_const_one(b, params, idx)),
-            ),
+fn substitute_params(
+    node: &crate::tree::EmlNode,
+    params: &[f64],
+    idx: &mut usize,
+) -> std::sync::Arc<crate::tree::EmlNode> {
+    use crate::tree::EmlNode;
+    match node {
+        EmlNode::One => {
+            let p = params.get(*idx).copied().unwrap_or(1.0);
+            *idx += 1;
+            std::sync::Arc::new(EmlNode::Const(p))
+        }
+        EmlNode::Const(v) => {
+            let p = params.get(*idx).copied().unwrap_or(*v);
+            *idx += 1;
+            std::sync::Arc::new(EmlNode::Const(p))
+        }
+        EmlNode::Var(i) => std::sync::Arc::new(EmlNode::Var(*i)),
+        EmlNode::Eml { left, right } => {
+            let l = substitute_params(left, params, idx);
+            let r = substitute_params(right, params, idx);
+            std::sync::Arc::new(EmlNode::Eml { left: l, right: r })
         }
     }
+}
 
-    // Suppress unused-function warning for substitute_ones (used for clarity)
-    let _ = substitute_ones;
-
-    replace_const_one(&lowered, params, &mut param_idx)
+fn replace_const_one(op: &LoweredOp, params: &[f64], idx: &mut usize) -> LoweredOp {
+    match op {
+        LoweredOp::Const(c) if (*c - 1.0).abs() < 1e-15 => {
+            if *idx < params.len() {
+                let p = params[*idx];
+                *idx += 1;
+                LoweredOp::Const(p)
+            } else {
+                op.clone()
+            }
+        }
+        LoweredOp::Const(_) | LoweredOp::Var(_) | LoweredOp::NamedConst(_) => op.clone(),
+        LoweredOp::Neg(a) => LoweredOp::Neg(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Exp(a) => LoweredOp::Exp(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Ln(a) => LoweredOp::Ln(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Sin(a) => LoweredOp::Sin(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Cos(a) => LoweredOp::Cos(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Tan(a) => LoweredOp::Tan(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Sinh(a) => LoweredOp::Sinh(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Cosh(a) => LoweredOp::Cosh(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Tanh(a) => LoweredOp::Tanh(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Arcsin(a) => LoweredOp::Arcsin(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Arccos(a) => LoweredOp::Arccos(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Arctan(a) => LoweredOp::Arctan(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Arcsinh(a) => LoweredOp::Arcsinh(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Arccosh(a) => LoweredOp::Arccosh(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Arctanh(a) => LoweredOp::Arctanh(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Erf(a) => LoweredOp::Erf(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::LGamma(a) => LoweredOp::LGamma(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Digamma(a) => LoweredOp::Digamma(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Trigamma(a) => LoweredOp::Trigamma(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Ei(a) => LoweredOp::Ei(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Si(a) => LoweredOp::Si(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Ci(a) => LoweredOp::Ci(Arc::new(replace_const_one(a, params, idx))),
+        LoweredOp::Add(a, b) => LoweredOp::Add(
+            Arc::new(replace_const_one(a, params, idx)),
+            Arc::new(replace_const_one(b, params, idx)),
+        ),
+        LoweredOp::Sub(a, b) => LoweredOp::Sub(
+            Arc::new(replace_const_one(a, params, idx)),
+            Arc::new(replace_const_one(b, params, idx)),
+        ),
+        LoweredOp::Mul(a, b) => LoweredOp::Mul(
+            Arc::new(replace_const_one(a, params, idx)),
+            Arc::new(replace_const_one(b, params, idx)),
+        ),
+        LoweredOp::Div(a, b) => LoweredOp::Div(
+            Arc::new(replace_const_one(a, params, idx)),
+            Arc::new(replace_const_one(b, params, idx)),
+        ),
+        LoweredOp::Pow(a, b) => LoweredOp::Pow(
+            Arc::new(replace_const_one(a, params, idx)),
+            Arc::new(replace_const_one(b, params, idx)),
+        ),
+    }
 }
 
 /// Candidate named constants for constants extraction, ordered by priority.
@@ -157,6 +153,13 @@ fn named_const_candidates() -> Vec<(f64, NamedConst)> {
         (-0.5, NamedConst::NegHalf),
         (1.0 / 3.0, NamedConst::Third),
         (0.25, NamedConst::Quarter),
+        (2.0 * std::f64::consts::PI, NamedConst::TwoPi),
+        (std::f64::consts::PI / 2.0, NamedConst::PiHalf),
+        (3.0_f64.sqrt(), NamedConst::Sqrt3),
+        (std::f64::consts::E * std::f64::consts::E, NamedConst::ESq),
+        ((1.0 + 5.0_f64.sqrt()) / 2.0, NamedConst::Phi),
+        (2.0_f64.ln(), NamedConst::Ln2),
+        (-2.0, NamedConst::NegTwo),
     ]
 }
 
@@ -179,115 +182,157 @@ fn substitute_const(
             }
         }
         LoweredOp::Var(_) => op.clone(),
-        LoweredOp::Neg(a) => LoweredOp::Neg(Box::new(substitute_const(
+        LoweredOp::Neg(a) => LoweredOp::Neg(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Exp(a) => LoweredOp::Exp(Box::new(substitute_const(
+        LoweredOp::Exp(a) => LoweredOp::Exp(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Ln(a) => LoweredOp::Ln(Box::new(substitute_const(
+        LoweredOp::Ln(a) => LoweredOp::Ln(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Sin(a) => LoweredOp::Sin(Box::new(substitute_const(
+        LoweredOp::Sin(a) => LoweredOp::Sin(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Cos(a) => LoweredOp::Cos(Box::new(substitute_const(
+        LoweredOp::Cos(a) => LoweredOp::Cos(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Tan(a) => LoweredOp::Tan(Box::new(substitute_const(
+        LoweredOp::Tan(a) => LoweredOp::Tan(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Sinh(a) => LoweredOp::Sinh(Box::new(substitute_const(
+        LoweredOp::Sinh(a) => LoweredOp::Sinh(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Cosh(a) => LoweredOp::Cosh(Box::new(substitute_const(
+        LoweredOp::Cosh(a) => LoweredOp::Cosh(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Tanh(a) => LoweredOp::Tanh(Box::new(substitute_const(
+        LoweredOp::Tanh(a) => LoweredOp::Tanh(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Arcsin(a) => LoweredOp::Arcsin(Box::new(substitute_const(
+        LoweredOp::Arcsin(a) => LoweredOp::Arcsin(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Arccos(a) => LoweredOp::Arccos(Box::new(substitute_const(
+        LoweredOp::Arccos(a) => LoweredOp::Arccos(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Arctan(a) => LoweredOp::Arctan(Box::new(substitute_const(
+        LoweredOp::Arctan(a) => LoweredOp::Arctan(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Arcsinh(a) => LoweredOp::Arcsinh(Box::new(substitute_const(
+        LoweredOp::Arcsinh(a) => LoweredOp::Arcsinh(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Arccosh(a) => LoweredOp::Arccosh(Box::new(substitute_const(
+        LoweredOp::Arccosh(a) => LoweredOp::Arccosh(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
-        LoweredOp::Arctanh(a) => LoweredOp::Arctanh(Box::new(substitute_const(
+        LoweredOp::Arctanh(a) => LoweredOp::Arctanh(Arc::new(substitute_const(
+            a,
+            target_idx,
+            replacement,
+            current_idx,
+        ))),
+        LoweredOp::Erf(a) => LoweredOp::Erf(Arc::new(substitute_const(
+            a,
+            target_idx,
+            replacement,
+            current_idx,
+        ))),
+        LoweredOp::LGamma(a) => LoweredOp::LGamma(Arc::new(substitute_const(
+            a,
+            target_idx,
+            replacement,
+            current_idx,
+        ))),
+        LoweredOp::Digamma(a) => LoweredOp::Digamma(Arc::new(substitute_const(
+            a,
+            target_idx,
+            replacement,
+            current_idx,
+        ))),
+        LoweredOp::Trigamma(a) => LoweredOp::Trigamma(Arc::new(substitute_const(
+            a,
+            target_idx,
+            replacement,
+            current_idx,
+        ))),
+        LoweredOp::Ei(a) => LoweredOp::Ei(Arc::new(substitute_const(
+            a,
+            target_idx,
+            replacement,
+            current_idx,
+        ))),
+        LoweredOp::Si(a) => LoweredOp::Si(Arc::new(substitute_const(
+            a,
+            target_idx,
+            replacement,
+            current_idx,
+        ))),
+        LoweredOp::Ci(a) => LoweredOp::Ci(Arc::new(substitute_const(
             a,
             target_idx,
             replacement,
             current_idx,
         ))),
         LoweredOp::Add(a, b) => LoweredOp::Add(
-            Box::new(substitute_const(a, target_idx, replacement, current_idx)),
-            Box::new(substitute_const(b, target_idx, replacement, current_idx)),
+            Arc::new(substitute_const(a, target_idx, replacement, current_idx)),
+            Arc::new(substitute_const(b, target_idx, replacement, current_idx)),
         ),
         LoweredOp::Sub(a, b) => LoweredOp::Sub(
-            Box::new(substitute_const(a, target_idx, replacement, current_idx)),
-            Box::new(substitute_const(b, target_idx, replacement, current_idx)),
+            Arc::new(substitute_const(a, target_idx, replacement, current_idx)),
+            Arc::new(substitute_const(b, target_idx, replacement, current_idx)),
         ),
         LoweredOp::Mul(a, b) => LoweredOp::Mul(
-            Box::new(substitute_const(a, target_idx, replacement, current_idx)),
-            Box::new(substitute_const(b, target_idx, replacement, current_idx)),
+            Arc::new(substitute_const(a, target_idx, replacement, current_idx)),
+            Arc::new(substitute_const(b, target_idx, replacement, current_idx)),
         ),
         LoweredOp::Div(a, b) => LoweredOp::Div(
-            Box::new(substitute_const(a, target_idx, replacement, current_idx)),
-            Box::new(substitute_const(b, target_idx, replacement, current_idx)),
+            Arc::new(substitute_const(a, target_idx, replacement, current_idx)),
+            Arc::new(substitute_const(b, target_idx, replacement, current_idx)),
         ),
         LoweredOp::Pow(a, b) => LoweredOp::Pow(
-            Box::new(substitute_const(a, target_idx, replacement, current_idx)),
-            Box::new(substitute_const(b, target_idx, replacement, current_idx)),
+            Arc::new(substitute_const(a, target_idx, replacement, current_idx)),
+            Arc::new(substitute_const(b, target_idx, replacement, current_idx)),
         ),
     }
 }
@@ -311,7 +356,14 @@ fn count_const_nodes(op: &LoweredOp) -> usize {
         | LoweredOp::Arctan(a)
         | LoweredOp::Arcsinh(a)
         | LoweredOp::Arccosh(a)
-        | LoweredOp::Arctanh(a) => count_const_nodes(a),
+        | LoweredOp::Arctanh(a)
+        | LoweredOp::Erf(a)
+        | LoweredOp::LGamma(a)
+        | LoweredOp::Digamma(a)
+        | LoweredOp::Trigamma(a)
+        | LoweredOp::Ei(a)
+        | LoweredOp::Si(a)
+        | LoweredOp::Ci(a) => count_const_nodes(a),
         LoweredOp::Add(a, b)
         | LoweredOp::Sub(a, b)
         | LoweredOp::Mul(a, b)
@@ -408,7 +460,14 @@ pub(super) fn extract_named_constants(
                             | LoweredOp::Arctan(a)
                             | LoweredOp::Arcsinh(a)
                             | LoweredOp::Arccosh(a)
-                            | LoweredOp::Arctanh(a) => get_const_val(a, target_idx, ctr),
+                            | LoweredOp::Arctanh(a)
+                            | LoweredOp::Erf(a)
+                            | LoweredOp::LGamma(a)
+                            | LoweredOp::Digamma(a)
+                            | LoweredOp::Trigamma(a)
+                            | LoweredOp::Ei(a)
+                            | LoweredOp::Si(a)
+                            | LoweredOp::Ci(a) => get_const_val(a, target_idx, ctr),
                             LoweredOp::Add(a, b)
                             | LoweredOp::Sub(a, b)
                             | LoweredOp::Mul(a, b)
@@ -439,4 +498,42 @@ pub(super) fn extract_named_constants(
     }
 
     (current, current_mse)
+}
+
+/// Attempt to snap a float value to the nearest named constant.
+///
+/// Returns `Some(nc)` when `v` is within 2% of a named constant's value,
+/// `None` otherwise.
+pub fn snap_to_named_const(v: f64) -> Option<NamedConst> {
+    for (cand_val, nc) in named_const_candidates() {
+        if cand_val.abs() > 1e-12 && (v - cand_val).abs() <= 0.02 * cand_val.abs() {
+            return Some(nc);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_composite_snapping_twopi() {
+        // 2π ≈ 6.283185; use the constant directly to avoid approx_constant warning.
+        let nc = snap_to_named_const(2.0 * std::f64::consts::PI);
+        assert_eq!(nc, Some(NamedConst::TwoPi));
+    }
+
+    #[test]
+    fn test_composite_snapping_no_snap() {
+        let nc = snap_to_named_const(3.5);
+        assert_eq!(nc, None);
+    }
+
+    #[test]
+    fn test_composite_snapping_pihalf() {
+        // π/2 ≈ 1.5708; use the constant directly to avoid approx_constant warning.
+        let nc = snap_to_named_const(std::f64::consts::FRAC_PI_2);
+        assert_eq!(nc, Some(NamedConst::PiHalf));
+    }
 }

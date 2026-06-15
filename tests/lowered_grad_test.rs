@@ -6,6 +6,7 @@
 //! pretty-printed identity so simplification stays deterministic.
 
 use oxieml::{Canonical, EmlTree, EvalCtx, LoweredOp};
+use std::sync::Arc;
 
 const H: f64 = 1e-5;
 
@@ -62,7 +63,7 @@ fn grad_sin_is_cos() {
 #[test]
 fn grad_product_rule() {
     // f(x,y) = x*y, df/dx = y, df/dy = x
-    let op = LoweredOp::Mul(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let op = LoweredOp::Mul(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let dx = op.grad(0);
     let dy = op.grad(1);
     assert!((eval_lowered(&dx, &[3.0, 5.0]) - 5.0).abs() < 1e-12);
@@ -72,10 +73,10 @@ fn grad_product_rule() {
 #[test]
 fn grad_polynomial() {
     // f(x) = x^3 + 2x, f'(x) = 3x^2 + 2 ; f'(2) = 14
-    let x = Box::new(LoweredOp::Var(0));
-    let x_cubed = LoweredOp::Mul(Box::new(LoweredOp::Mul(x.clone(), x.clone())), x.clone());
-    let two_x = LoweredOp::Mul(Box::new(LoweredOp::Const(2.0)), x.clone());
-    let f = LoweredOp::Add(Box::new(x_cubed), Box::new(two_x));
+    let x = Arc::new(LoweredOp::Var(0));
+    let x_cubed = LoweredOp::Mul(Arc::new(LoweredOp::Mul(x.clone(), x.clone())), x.clone());
+    let two_x = LoweredOp::Mul(Arc::new(LoweredOp::Const(2.0)), x.clone());
+    let f = LoweredOp::Add(Arc::new(x_cubed), Arc::new(two_x));
     let df = f.grad(0);
     assert!((eval_lowered(&df, &[2.0]) - 14.0).abs() < 1e-10);
 }
@@ -83,7 +84,7 @@ fn grad_polynomial() {
 #[test]
 fn grad_quotient_rule() {
     // f(x) = 1/x, f'(x) = -1/x^2
-    let op = LoweredOp::Div(Box::new(LoweredOp::Const(1.0)), Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Div(Arc::new(LoweredOp::Const(1.0)), Arc::new(LoweredOp::Var(0)));
     let d = op.grad(0);
     for &v in &[0.5, 1.0, 2.0, 3.0] {
         let sym = eval_lowered(&d, &[v]);
@@ -98,7 +99,7 @@ fn grad_quotient_rule() {
 #[test]
 fn grad_wrt_other_var_is_zero() {
     // The expression involves only x0; differentiating wrt x1 must give 0.
-    let op = LoweredOp::Exp(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Exp(Arc::new(LoweredOp::Var(0)));
     let d = op.grad(1);
     assert_eq!(eval_lowered(&d, &[1.0, 99.0]), 0.0);
 }
@@ -131,7 +132,7 @@ fn grad_composition_chain_rule() {
 #[test]
 fn grad_of_grad_sin_is_minus_sin() {
     // f(x) = sin(x); f''(x) = -sin(x). Compute grad twice and compare.
-    let op = LoweredOp::Sin(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Sin(Arc::new(LoweredOp::Var(0)));
     let d1 = op.grad(0);
     let d2 = d1.grad(0);
     for &v in &[-1.3, -0.4, 0.0, 0.6, 1.8] {
@@ -147,13 +148,14 @@ fn grad_of_grad_sin_is_minus_sin() {
 #[test]
 fn grad_is_idempotent_via_pretty() {
     // f(x) = x * x; symbolic derivative through the product rule yields
-    // x'·x + x·x' = 1·x + x·1, which after simplify reduces to (x0 + x0).
+    // x'·x + x·x' = 1·x + x·1. After polynomial canonicalization this
+    // collapses to the canonical form (2 * x0).
     // Lock this exact surface form so future simplification changes are
     // caught explicitly.
-    let x = Box::new(LoweredOp::Var(0));
+    let x = Arc::new(LoweredOp::Var(0));
     let op = LoweredOp::Mul(x.clone(), x.clone());
     let d = op.grad(0);
-    assert_eq!(d.to_pretty(), "(x0 + x0)");
+    assert_eq!(d.to_pretty(), "(2 * x0)");
     // Numerical sanity check: f'(3) = 2·3 = 6.
     assert!((eval_lowered(&d, &[3.0]) - 6.0).abs() < 1e-12);
 }
@@ -161,9 +163,9 @@ fn grad_is_idempotent_via_pretty() {
 #[test]
 fn grad_neg_flips_sign() {
     // f(x) = -x^2, f'(x) = -2x ; at x=4 should be -8.
-    let x = Box::new(LoweredOp::Var(0));
+    let x = Arc::new(LoweredOp::Var(0));
     let x_sq = LoweredOp::Mul(x.clone(), x);
-    let op = LoweredOp::Neg(Box::new(x_sq));
+    let op = LoweredOp::Neg(Arc::new(x_sq));
     let d = op.grad(0);
     assert!((eval_lowered(&d, &[4.0]) - (-8.0)).abs() < 1e-12);
     assert!((eval_lowered(&d, &[-1.5]) - 3.0).abs() < 1e-12);
@@ -172,7 +174,7 @@ fn grad_neg_flips_sign() {
 #[test]
 fn grad_ln_reciprocal() {
     // f(x) = ln(x), f'(x) = 1/x
-    let op = LoweredOp::Ln(Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Ln(Arc::new(LoweredOp::Var(0)));
     let d = op.grad(0);
     for &v in &[0.5, 1.0, 2.0, 7.5] {
         let sym = eval_lowered(&d, &[v]);
@@ -187,7 +189,7 @@ fn grad_ln_reciprocal() {
 #[test]
 fn grad_pow_general_rule() {
     // f(x, y) = x^y, df/dx = y·x^(y-1), df/dy = x^y · ln(x).
-    let op = LoweredOp::Pow(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Var(1)));
+    let op = LoweredOp::Pow(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Var(1)));
     let dx = op.grad(0);
     let dy = op.grad(1);
     let cases = [(2.0_f64, 3.0_f64), (1.5, 2.0), (4.0, 0.5)];

@@ -70,6 +70,21 @@ impl ParameterizedEmlTree {
     /// factor. This enables non-MSE losses (Huber, TrimmedMse) to reuse the
     /// same back-propagation without duplicating the tape machinery.
     pub fn forward_with_jacobian(&self, ctx: &EvalCtx) -> Result<(f64, Vec<f64>), EmlError> {
+        let mut jac = Vec::with_capacity(self.params.len());
+        let output = self.forward_with_jacobian_into(ctx, &mut jac)?;
+        Ok((output, jac))
+    }
+
+    /// Forward pass writing the parameter Jacobian into a caller-provided buffer.
+    ///
+    /// Fills `jac_out` with `self.params.len()` entries (one per parameter)
+    /// and returns the scalar output. `jac_out` is cleared before filling.
+    /// Callers may pass a pre-allocated buffer to avoid per-call allocation.
+    pub fn forward_with_jacobian_into(
+        &self,
+        ctx: &EvalCtx,
+        jac_out: &mut Vec<f64>,
+    ) -> Result<f64, EmlError> {
         let (tape, values) = self.build_tape_and_forward(ctx)?;
 
         let output = values.last().copied().unwrap_or(Complex64::new(0.0, 0.0));
@@ -96,14 +111,14 @@ impl ParameterizedEmlTree {
             }
         }
 
-        let mut param_jac = Vec::with_capacity(self.params.len());
+        jac_out.clear();
         for (i, entry) in tape.iter().enumerate() {
             if let TapeEntry::Param = entry {
-                param_jac.push(grad_values[i].re);
+                jac_out.push(grad_values[i].re);
             }
         }
 
-        Ok((output_re, param_jac))
+        Ok(output_re)
     }
 
     /// Forward + backward pass.
@@ -195,6 +210,18 @@ impl ParameterizedEmlTree {
                 values.push(Complex64::new(p, 0.0));
                 Ok(idx)
             }
+            EmlNode::Const(v) => {
+                let idx = tape.len();
+                let p = if *param_idx < self.params.len() {
+                    self.params[*param_idx]
+                } else {
+                    *v
+                };
+                *param_idx += 1;
+                tape.push(TapeEntry::Param);
+                values.push(Complex64::new(p, 0.0));
+                Ok(idx)
+            }
             EmlNode::Var(var_idx) => {
                 let idx = tape.len();
                 let val = ctx
@@ -225,6 +252,7 @@ impl ParameterizedEmlTree {
 fn count_ones(node: &EmlNode) -> usize {
     match node {
         EmlNode::One => 1,
+        EmlNode::Const(_) => 1,
         EmlNode::Var(_) => 0,
         EmlNode::Eml { left, right } => count_ones(left) + count_ones(right),
     }
@@ -268,6 +296,15 @@ fn reconstruct_node(node: &EmlNode, params: &[f64], param_idx: &mut usize) -> Ar
             // Keep as One — the parameter was used during optimization
             // but the reconstructed tree uses the standard EmlNode::One
             Arc::new(EmlNode::One)
+        }
+        EmlNode::Const(v) => {
+            let p = if *param_idx < params.len() {
+                params[*param_idx]
+            } else {
+                *v
+            };
+            *param_idx += 1;
+            Arc::new(EmlNode::Const(p))
         }
         EmlNode::Var(i) => Arc::new(EmlNode::Var(*i)),
         EmlNode::Eml { left, right } => {
@@ -328,5 +365,29 @@ mod tests {
             .expect("gradient computation should succeed");
         assert!(loss > 0.0);
         assert!(grads.iter().any(|g| g.abs() > 1e-10));
+    }
+
+    #[test]
+    fn test_forward_with_jacobian_into_matches_regular() {
+        // eml(x, 1) with params [1.0]: output and Jacobian must match
+        let x = EmlTree::var(0);
+        let one = EmlTree::one();
+        let tree = EmlTree::eml(&x, &one);
+        let ptree = ParameterizedEmlTree::from_topology(&tree, 1.0);
+        let ctx = EvalCtx::new(&[1.0]);
+
+        let (out1, jac1) = ptree
+            .forward_with_jacobian(&ctx)
+            .expect("forward_with_jacobian should succeed");
+        let mut jac2 = Vec::new();
+        let out2 = ptree
+            .forward_with_jacobian_into(&ctx, &mut jac2)
+            .expect("forward_with_jacobian_into should succeed");
+
+        assert!(
+            (out1 - out2).abs() < 1e-15,
+            "outputs differ: {out1} vs {out2}"
+        );
+        assert_eq!(jac1, jac2, "Jacobians differ");
     }
 }

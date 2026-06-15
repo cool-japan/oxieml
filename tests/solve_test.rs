@@ -1,5 +1,6 @@
 use oxieml::SolveResult;
 use oxieml::lower::LoweredOp;
+use std::sync::Arc;
 
 fn is_closed(r: &SolveResult) -> bool {
     matches!(r, SolveResult::Closed(_))
@@ -16,11 +17,11 @@ fn closed_eval(r: SolveResult, vars: &[f64]) -> f64 {
 fn solve_linear() {
     // 2*x + 3 == 7 → x == 2
     let expr = LoweredOp::Add(
-        Box::new(LoweredOp::Mul(
-            Box::new(LoweredOp::Const(2.0)),
-            Box::new(LoweredOp::Var(0)),
+        Arc::new(LoweredOp::Mul(
+            Arc::new(LoweredOp::Const(2.0)),
+            Arc::new(LoweredOp::Var(0)),
         )),
-        Box::new(LoweredOp::Const(3.0)),
+        Arc::new(LoweredOp::Const(3.0)),
     );
     let rhs = LoweredOp::Const(7.0);
     let result = expr.solve_for(0, &rhs);
@@ -32,7 +33,7 @@ fn solve_linear() {
 #[test]
 fn solve_exp() {
     // exp(x) == e → x == 1
-    let expr = LoweredOp::Exp(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Exp(Arc::new(LoweredOp::Var(0)));
     let rhs = LoweredOp::Const(std::f64::consts::E);
     let result = expr.solve_for(0, &rhs);
     assert!(is_closed(&result));
@@ -44,10 +45,10 @@ fn solve_exp() {
 fn solve_nested() {
     // 3 * exp(x + 1) == 3e → exp(x+1) == e → x+1 == 1 → x == 0
     let expr = LoweredOp::Mul(
-        Box::new(LoweredOp::Const(3.0)),
-        Box::new(LoweredOp::Exp(Box::new(LoweredOp::Add(
-            Box::new(LoweredOp::Var(0)),
-            Box::new(LoweredOp::Const(1.0)),
+        Arc::new(LoweredOp::Const(3.0)),
+        Arc::new(LoweredOp::Exp(Arc::new(LoweredOp::Add(
+            Arc::new(LoweredOp::Var(0)),
+            Arc::new(LoweredOp::Const(1.0)),
         )))),
     );
     let rhs = LoweredOp::Const(3.0 * std::f64::consts::E);
@@ -60,7 +61,7 @@ fn solve_nested() {
 #[test]
 fn solve_sin() {
     // sin(x) == 0.5 → x == arcsin(0.5) == π/6
-    let expr = LoweredOp::Sin(Box::new(LoweredOp::Var(0)));
+    let expr = LoweredOp::Sin(Arc::new(LoweredOp::Var(0)));
     let rhs = LoweredOp::Const(0.5);
     let result = expr.solve_for(0, &rhs);
     assert!(is_closed(&result));
@@ -75,7 +76,7 @@ fn solve_sin() {
 #[test]
 fn solve_power() {
     // x^2 == 9 → x == 9^(1/2) == 3
-    let expr = LoweredOp::Pow(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Const(2.0)));
+    let expr = LoweredOp::Pow(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Const(2.0)));
     let rhs = LoweredOp::Const(9.0);
     let result = expr.solve_for(0, &rhs);
     assert!(is_closed(&result));
@@ -87,8 +88,8 @@ fn solve_power() {
 fn solve_unsolvable_returns_residual() {
     // x + sin(x) == 1: not algebraically solvable
     let expr = LoweredOp::Add(
-        Box::new(LoweredOp::Var(0)),
-        Box::new(LoweredOp::Sin(Box::new(LoweredOp::Var(0)))),
+        Arc::new(LoweredOp::Var(0)),
+        Arc::new(LoweredOp::Sin(Arc::new(LoweredOp::Var(0)))),
     );
     let rhs = LoweredOp::Const(1.0);
     let result = expr.solve_for(0, &rhs);
@@ -97,7 +98,7 @@ fn solve_unsolvable_returns_residual() {
 
 #[test]
 fn contains_var_basic() {
-    let expr = LoweredOp::Add(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Const(1.0)));
+    let expr = LoweredOp::Add(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Const(1.0)));
     assert!(expr.contains_var(0));
     assert!(!expr.contains_var(1));
 }
@@ -105,7 +106,7 @@ fn contains_var_basic() {
 #[test]
 fn solve_division() {
     // x / 4 == 3 → x == 12
-    let expr = LoweredOp::Div(Box::new(LoweredOp::Var(0)), Box::new(LoweredOp::Const(4.0)));
+    let expr = LoweredOp::Div(Arc::new(LoweredOp::Var(0)), Arc::new(LoweredOp::Const(4.0)));
     let result = expr.solve_for(0, &LoweredOp::Const(3.0));
     assert!(is_closed(&result));
     let val = closed_eval(result, &[]);

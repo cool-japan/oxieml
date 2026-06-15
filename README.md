@@ -29,17 +29,17 @@ University, Institute of Theoretical Physics).
 6. **Gradient / Jacobian / Hessian** — Symbolic differentiation on `LoweredOp` with
    `LoweredOp::grad(wrt)`, `grad_all()`, `jacobian(n)`, `hessian(n)`.
 
-7. **Extended Transcendentals** — `LoweredOp` has `Tan`, `Sinh`, `Cosh`, `Tanh`,
-   `Arcsin`, `Arccos`, `Arctan`, `Arcsinh`, `Arccosh`, `Arctanh` with canonical EML
-   shape recognition.
+7. **Extended Transcendentals & Special Functions** — `LoweredOp` has `Tan`, `Sinh`, `Cosh`,
+   `Tanh`, `Arcsin`, `Arccos`, `Arctan`, `Arcsinh`, `Arccosh`, `Arctanh` with canonical EML
+   shape recognition; plus `erf`, `erfc`, `lgamma`, `digamma`, `ei`, `si`, `ci`.
 
 8. **Interval Arithmetic** — `LoweredOp::eval_interval` for range analysis and
    symreg pruning.
 
 9. **JIT Compilation** — Cranelift-based JIT for hot evaluation paths (feature: `jit`).
 
-10. **ODE Discovery** — SINDy-style ODE/PDE discovery from trajectory data
-    (`SymRegEngine::discover_ode`).
+10. **ODE Discovery & Solving** — SINDy-style ODE/PDE discovery from trajectory data
+    (`SymRegEngine::discover_ode`); symbolic `dsolve` for exact closed-form solutions.
 
 11. **Multi-output Symbolic Regression** — `SymRegEngine::discover_multi` for
     vector-valued formulas.
@@ -67,6 +67,41 @@ University, Institute of Theoretical Physics).
     export (feature: `tensorlogic`).
 
 21. **SciRS2 Integration** — ndarray adapter (feature: `scirs2`).
+
+22. **Automatic Differentiation** — `jvp(x, tangents) -> (f64, f64)` forward mode via dual
+    numbers; `vjp(x) -> (f64, Vec<f64>)` reverse-mode sweep; `nth_derivative(wrt, n)` and
+    `mixed_partial(&[usize])` for higher-order symbolic derivatives.
+
+23. **Symbolic Integration** — `LoweredOp::integrate(wrt)` for indefinite antiderivatives
+    (power rule, trig/hyperbolic table, u-substitution, integration by parts, rational partial
+    fractions); `integrate_definite(wrt, a, b, ctx)` with adaptive-quadrature fallback.
+
+24. **Limit Computation** — `LoweredOp::limit(wrt, LimitPoint)` returns `LimitResult`
+    (`Finite`, `PosInf`, `NegInf`, `DoesNotExist`, `Indeterminate`); L'Hôpital for 0/0 and
+    ∞/∞ with numeric two-sided probing.
+
+25. **Taylor / Maclaurin Series** — `LoweredOp::taylor(wrt, center, order)` expands to
+    order-n polynomial; `maclaurin(wrt, order)` shorthand.
+
+26. **Polynomial Algebra** — `Poly` (dense univariate, exact `Ratio<i64>` coefficients):
+    `div_rem`, `gcd`, `square_free` (Yun), `rational_roots`, `isolate_real_roots` (Sturm).
+    `MultiPoly` sparse multivariate. Converts to/from `LoweredOp` for symbolic interop.
+
+27. **Numeric Root-finding & Quadrature** — `find_root`, `find_roots_in`, `lambert_w0`,
+    `lambert_wm1` (Halley); `quadrature` (adaptive Simpson); `solve_for_all` with quadratic /
+    Cardano cubic exact solving.
+
+28. **Verified Numerics** — `integrate_definite_verified` (guaranteed enclosure),
+    `find_root_verified` returning `RootCertificate { enclosure, status }` via interval Newton
+    / Krawczyk operator.
+
+29. **N-dimensional Quadrature & Systems** — `quadrature_nd(vars, lo, hi, opts)` via tensor
+    Gauss-Legendre (n ≤ 4) or Monte Carlo; `solve_system(fs, x0, opts)` multivariate Newton
+    with Armijo line search driven by the symbolic Jacobian.
+
+30. **Levenberg-Marquardt & Advanced Symreg** — `OptimizerKind::LevenbergMarquardt` for
+    sharper constant fitting; PDE discovery (`discover_pde`); uncertainty quantification via
+    bootstrap or analytic covariance; AIC/BIC information criteria for model selection.
 
 ## CLI Tool
 
@@ -212,9 +247,17 @@ match solver.check_sat(&c).unwrap() {
 
 The `EmlSmtSolver` can prove **UNSAT** for cases the legacy `EmlNraSolver`
 (interval bisection) cannot — e.g., `ln(x) > 0` with `x ∈ [-2, -1]` (ln
-undefined for non-positive reals). It falls back to bisection on OxiZ-tightened
-bounds to extract concrete SAT witnesses, since extracting real-valued models
-from OxiZ 0.2 is not yet ergonomic.
+undefined for non-positive reals). On SAT, the OxiZ model is used as a
+Newton-refinement seed for the solution extraction.
+
+**Two levels of SMT-guided symreg pruning:**
+- `smt_prune = true` — interval-only propagation via `IntervalDomain` (cheap,
+  always-on when the `smt` feature is enabled)
+- `smt_prune_solver = true` — full OxiZ `check_sat` UNSAT pruning (opt-in,
+  depth-gated); more expensive but catches cases interval propagation misses
+
+Both flags can be set simultaneously; `smt_prune_solver` adds OxiZ UNSAT calls
+on top of interval propagation.
 
 Enable with:
 
@@ -245,8 +288,41 @@ Released 2026-05-03.
 - WASM bindings (`wasm` feature, npm: `@cool-japan/oxieml`)
 - TensorLogic integration (`tensorlogic` feature): soft-prior export
 - SciRS2 integration (`scirs2` feature): ndarray adapters
-- Constraint-guided symreg pruning via `EmlSmtSolver` (UNSAT-prune topologies)
+- Constraint-guided symreg pruning: `SymRegConfig.smt_prune = true` (interval propagation) and `smt_prune_solver = true` (full OxiZ `check_sat` UNSAT pruning, opt-in)
 - CLI: `--grad`/`-d`, `--symreg`/`-s`, `--format`, `--output`, `--strategy` flags
+
+## What's New in v0.1.2
+
+Released 2026-06-15.
+
+- **Special Functions** — pure-Rust `erf`, `erfc`, `lgamma`, `digamma`, `ei`, `si`, `ci`;
+  symbolic derivatives and integrals; relative error < 1e-13
+- **Symbolic ODE Solving** — `dsolve` recognizes separable, linear, exact, Bernoulli,
+  and second-order constant-coefficient ODEs; returns closed-form solutions with
+  arbitrary constants
+- **Polynomial Complex Roots** — `solve_polynomial_complex` finds all roots (real +
+  complex) via Durand-Kerner; `ComplexRoots::real_roots(tol)` filter
+- **Bounded Quantifiers** — `EmlConstraint::ForAll`/`Exists` over box domains; decided
+  by interval refutation or 5-point witness search; `QuantResult` carries witnesses and
+  counterexamples
+- **Analytic UQ** — `SymRegConfig.uq_analytic = true` computes Laplace/Hessian CIs:
+  `Σ = σ̂²(JᵀJ)⁻¹`, CIs = `θ̂ ± z·√diagΣ`; requires Levenberg-Marquardt optimizer
+- **Multi-D PDE Discovery** — `discover_pde_nd` extends PDE-FIND to 2-D/3-D grids with
+  extensible `Vec<PdeLibraryTerm>`, mixed derivatives, and weak-form mode
+- **Rank-Revealing Linear Algebra** — `linalg::solve_least_squares` (Householder QR),
+  `linalg::pinv` (one-sided Jacobi SVD), both returning `Result<Vec<f64>, EmlError>`
+- **Rational Dimension Exponents** — `Units` supports rational exponents (`Units::METER.sqrt()`
+  gives `m^(1/2)`); rationalized via continued-fraction (denominator ≤ 12)
+- **SMT model seeding** — on SAT, the OxiZ model is used as a Newton-refinement seed;
+  new `smt_prune_solver = true` flag for depth-gated OxiZ UNSAT pruning
+- **SIMD Transcendentals** — `simd_vec_math::{simd_exp, simd_ln, simd_sin, simd_cos,
+  simd_tanh}` with Horner + FMA; ~1e-13 relative error for exp/ln
+- **Python Bindings** — new wrappers: `integrate_definite`, `limit`, `solve_for_all`,
+  `solve_polynomial_complex`, `erf`, `erfc`, `lgamma`, `digamma`, `ei`, `si`, `ci`,
+  `lambert_w0`, `lambert_wm1`, `dsolve`; `PySymRegConfig` exposes `uq_analytic` and
+  `smt_prune_solver`
+- **WASM Bindings** — `exhaustive()` preset added; curated browser subset:
+  `parse_and_eval`, `to_latex_wasm`, `integrate_definite_wasm`, `solve_for_all_wasm`
 
 ## Canonical Constructions (Complete Phylogenetic Tree)
 
@@ -368,8 +444,23 @@ S -> 1 | eml(S,S) -------> Add/Sub/Mul/Exp/Ln...
 | `scirs2`         | [feature: scirs2] ndarray adapter for SciRS2 integration |
 | `python`         | [feature: python] PyO3 bindings for Python |
 | `wasm`           | [feature: wasm] wasm-bindgen bindings for browser/Node.js |
-| `units`          | SI unit algebra (7-exponent vector, `Units` struct) |
-| `solve`          | Symbolic equation solving |
+| `units`          | SI unit algebra with rational exponents (`Rexp`, `Units`) |
+| `solve`          | Symbolic equation solving (`solve_for`, `solve_polynomial_complex`) |
+| `ode`            | Symbolic ODE solving (`dsolve`, `OdeForm`, `OdeSolution`) |
+| `special`        | Special functions (`erf`, `erfc`, `lgamma`, `digamma`, `ei`, `si`, `ci`) |
+| `linalg`         | Rank-revealing LA: QR, SVD, `pinv`, `solve_least_squares` |
+| `simd_vec_math`  | SIMD transcendentals (`simd_exp`, `simd_ln`, `simd_sin`, `simd_cos`, `simd_tanh`) |
+| `autodiff`       | JVP (dual-number forward mode), VJP (reverse sweep), `nth_derivative`, `mixed_partial` |
+| `integrate`      | Symbolic antidifferentiation, definite integration with adaptive-quadrature fallback |
+| `integrate_subst`| u-substitution, trig substitution, rational partial-fractions integration |
+| `limit`          | Limit computation: L'Hôpital + numeric two-sided probing; `LimitPoint`/`LimitResult` |
+| `series`         | Taylor/Maclaurin series: `taylor(wrt, center, order)`, `maclaurin(wrt, order)` |
+| `poly`           | Exact polynomial algebra: `Poly` (univariate, `Ratio<i64>` coeffs), `MultiPoly` (sparse multivariate) |
+| `solve_poly`     | Equation solving: quadratic, Cardano cubic, Lambert-W via Halley, `solve_for_all`, `solve_system` |
+| `numeric`        | Root-finding (Newton-Brent), adaptive-Simpson quadrature, `RootOpts`, `QuadOpts` |
+| `numeric_verified`| Verified interval integration + Krawczyk root-finding with `RootCertificate` |
+| `quadrature_nd`  | Tensor-product Gauss-Legendre + Monte Carlo N-D quadrature; `quadrature_nd(vars, lo, hi)` |
+| `system`         | Multivariate Newton systems: `solve_system(fs, x0, opts)` via symbolic Jacobian |
 | `error`          | Error types |
 
 ## Features
@@ -422,7 +513,7 @@ scales near-linearly on large batches (100K+ points).
 - **Stack-machine evaluator** — Post-order traversal avoids recursion overflow
   on deep trees (sin alone needs 543 nodes)
 - **Complex64 internally** — Trig functions and π require `ln(-1) = iπ`;
-  complex eval is an internal detail, API is real-valued
+  complex eval is part of the public API (`EmlTree::eval_complex`), API is also real-valued via `eval_real`
 - **Discovery vs execution separation** — EML trees for search, lowered ops for speed
 - **Parser roundtrip** — `parse(to_compact_string(tree)) == tree`
 - **Pure Rust, zero FFI** — Deps: `num-complex`, `rand`;
@@ -430,7 +521,7 @@ scales near-linearly on large batches (100K+ points).
 
 ## Test Coverage
 
-434 tests covering:
+737 tests covering:
 - Canonical tree construction (correctness, complex, symbolic)
 - Lowering, compilation, pretty-print, LaTeX
 - Symbolic gradient, Jacobian, Hessian (central-difference cross-checks)
@@ -447,7 +538,7 @@ scales near-linearly on large batches (100K+ points).
 - CLI integration (eval, lower, grad, symreg, format, output flags)
 
 ```bash
-cargo nextest run --all-features    # 434 tests
+cargo nextest run --all-features    # 737 tests
 cargo clippy --all-targets --all-features -- -D warnings   # zero warnings
 cargo bench --features simd,parallel                       # criterion benchmarks
 ```

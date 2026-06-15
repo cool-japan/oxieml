@@ -3,6 +3,7 @@
 //! including propagation of NaN and Inf for domain violations.
 
 use oxieml::lower::LoweredOp;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // 1. fold_add_consts
@@ -10,8 +11,8 @@ use oxieml::lower::LoweredOp;
 #[test]
 fn fold_add_consts() {
     let op = LoweredOp::Add(
-        Box::new(LoweredOp::Const(2.0)),
-        Box::new(LoweredOp::Const(3.0)),
+        Arc::new(LoweredOp::Const(2.0)),
+        Arc::new(LoweredOp::Const(3.0)),
     );
     assert_eq!(op.simplify(), LoweredOp::Const(5.0));
 }
@@ -22,8 +23,8 @@ fn fold_add_consts() {
 #[test]
 fn fold_mul_consts() {
     let op = LoweredOp::Mul(
-        Box::new(LoweredOp::Const(3.0)),
-        Box::new(LoweredOp::Const(4.0)),
+        Arc::new(LoweredOp::Const(3.0)),
+        Arc::new(LoweredOp::Const(4.0)),
     );
     assert_eq!(op.simplify(), LoweredOp::Const(12.0));
 }
@@ -33,7 +34,7 @@ fn fold_mul_consts() {
 // ---------------------------------------------------------------------------
 #[test]
 fn fold_ln_neg_gives_nan() {
-    let op = LoweredOp::Ln(Box::new(LoweredOp::Const(-1.0)));
+    let op = LoweredOp::Ln(Arc::new(LoweredOp::Const(-1.0)));
     let result = op.simplify();
     match result {
         LoweredOp::Const(v) => assert!(v.is_nan(), "ln(-1) should fold to NaN, got Const({v})"),
@@ -47,8 +48,8 @@ fn fold_ln_neg_gives_nan() {
 #[test]
 fn fold_div_by_zero_gives_inf() {
     let op = LoweredOp::Div(
-        Box::new(LoweredOp::Const(1.0)),
-        Box::new(LoweredOp::Const(0.0)),
+        Arc::new(LoweredOp::Const(1.0)),
+        Arc::new(LoweredOp::Const(0.0)),
     );
     let result = op.simplify();
     match result {
@@ -64,11 +65,11 @@ fn fold_div_by_zero_gives_inf() {
 fn fold_nested_constant() {
     // (2 * 3) + 4 = 10
     let op = LoweredOp::Add(
-        Box::new(LoweredOp::Mul(
-            Box::new(LoweredOp::Const(2.0)),
-            Box::new(LoweredOp::Const(3.0)),
+        Arc::new(LoweredOp::Mul(
+            Arc::new(LoweredOp::Const(2.0)),
+            Arc::new(LoweredOp::Const(3.0)),
         )),
-        Box::new(LoweredOp::Const(4.0)),
+        Arc::new(LoweredOp::Const(4.0)),
     );
     assert_eq!(op.simplify(), LoweredOp::Const(10.0));
 }
@@ -79,8 +80,8 @@ fn fold_nested_constant() {
 #[test]
 fn fold_idempotent() {
     let op = LoweredOp::Add(
-        Box::new(LoweredOp::Const(2.0)),
-        Box::new(LoweredOp::Const(3.0)),
+        Arc::new(LoweredOp::Const(2.0)),
+        Arc::new(LoweredOp::Const(3.0)),
     );
     let s1 = op.simplify();
     let s2 = s1.clone().simplify();
@@ -92,7 +93,7 @@ fn fold_idempotent() {
 // ---------------------------------------------------------------------------
 #[test]
 fn fold_sin_const() {
-    let op = LoweredOp::Sin(Box::new(LoweredOp::Const(0.0)));
+    let op = LoweredOp::Sin(Arc::new(LoweredOp::Const(0.0)));
     let result = op.simplify();
     match result {
         LoweredOp::Const(v) => assert!(v.abs() < 1e-15, "sin(0) should fold to ~0.0, got {v}"),
@@ -105,7 +106,7 @@ fn fold_sin_const() {
 // ---------------------------------------------------------------------------
 #[test]
 fn fold_exp_const() {
-    let op = LoweredOp::Exp(Box::new(LoweredOp::Const(0.0)));
+    let op = LoweredOp::Exp(Arc::new(LoweredOp::Const(0.0)));
     assert_eq!(op.simplify(), LoweredOp::Const(1.0));
 }
 
@@ -114,7 +115,7 @@ fn fold_exp_const() {
 // ---------------------------------------------------------------------------
 #[test]
 fn partial_fold_leaves_vars() {
-    let op = LoweredOp::Add(Box::new(LoweredOp::Const(2.0)), Box::new(LoweredOp::Var(0)));
+    let op = LoweredOp::Add(Arc::new(LoweredOp::Const(2.0)), Arc::new(LoweredOp::Var(0)));
     let simplified = op.simplify();
     // Var(0) prevents folding; the Add node should remain
     assert!(
