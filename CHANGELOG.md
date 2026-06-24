@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-06-25
+
+### Fixed
+
+- **SMT soundness ([#1](https://github.com/cool-japan/oxieml/issues/1))** — `EmlSmtSolver::check_sat` (feature `smt`) could return an unsound `Unsat` for *satisfiable* constraints whenever the EML tree contained an `eml` node whose `ln`-operand (the right child) reached `<= 0` over the variable domain — e.g. constraints whose left-hand side is built via `Canonical::sub`/`ln`, which legitimately evaluate an intermediate `ln` of a non-positive value in the **complex** domain (the imaginary parts cancel and the final real value is well-defined). Phase-1 interval propagation evaluated that intermediate `ln` in the **real** domain, where `Interval::ln` of a non-positive interval is empty, and the interval walkers turned that emptiness into a `Conflict`, yielding a spurious `Unsat`.
+  - `eval_interval` now returns `Option<Interval>` and reports **indeterminate** (`None`) — rather than empty/conflict — when `ln` is applied to an interval reaching `<= 0` or a non-finite bound. All six atomic propagation arms (`EqZero`/`GtZero`/`GeZero`/`LtZero`/`LeZero`/`NeZero`) treat indeterminate as `PropResult::Stable` (no conflict, no tightening); `backward_propagate`'s `Eml` arm guards the `ln`-operand and skips back-substitution instead of conflicting.
+  - Soundness restored: `Unsat` is now returned only for genuinely infeasible constraints. Cases such as `ln(x) > 0` on a strictly-negative domain now soundly return `Unknown` instead of `Unsat` (returning `Unknown`/`Stable` is always sound; a false `Unsat` is not). Interval-only symbolic-regression pruning (`smt_prune`) becomes strictly more conservative — it can no longer discard a satisfiable topology.
+  - Regression coverage: new `tests/smt_issue1_const_ln_operand_test.rs` (asserts the interval layer never spuriously conflicts, and that all seven issue cases are sound with re-verified witnesses). Two pre-existing tests in `src/smt/smt_tests.rs` that encoded the unsound `Unsat`/`Conflict` as "expected" were corrected to assert the sound `Unknown`/non-`Conflict` result.
+
 ## [0.1.2] - 2026-06-15
 
 ### Added
@@ -256,4 +265,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive test suite (173 tests)
 - Criterion benchmarks for evaluation and symbolic regression
 
+[0.1.3]: https://github.com/cool-japan/oxieml/releases/tag/v0.1.3
 [0.1.2]: https://github.com/cool-japan/oxieml/releases/tag/v0.1.2

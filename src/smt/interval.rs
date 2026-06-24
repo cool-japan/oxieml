@@ -162,30 +162,43 @@ impl IntervalDomain {
 }
 
 /// Forward-evaluate an EML subtree on interval-valued variables.
-/// Returns the interval of possible output values.
-fn eval_interval(node: &EmlNode, vars: &[Interval]) -> Interval {
+///
+/// Returns `Some(interval)` — a **sound** over-approximation of the node's real
+/// value — or `None` when the node cannot be soundly bounded by real interval
+/// arithmetic. `None` arises when a `ln` is applied to an interval that reaches
+/// `<= 0` (or is non-finite): in EML's complex evaluation semantics
+/// (`exp(ln(z)) = z`, and the `sub`/`neg`/`div` constructions) such a
+/// subexpression may still resolve to a real number, so treating it as
+/// empty/infeasible would be UNSOUND and is the cause of spurious `Unsat`.
+/// `None` is the honest "don't know" that callers convert to no-tightening /
+/// no-conflict.
+fn eval_interval(node: &EmlNode, vars: &[Interval]) -> Option<Interval> {
     match node {
-        EmlNode::One => Interval::new(1.0, 1.0),
-        EmlNode::Const(v) => Interval::new(*v, *v),
-        EmlNode::Var(i) => vars
-            .get(*i)
-            .copied()
-            .unwrap_or_else(|| Interval::new(-10.0, 10.0)),
+        EmlNode::One => Some(Interval::new(1.0, 1.0)),
+        EmlNode::Const(v) => Some(Interval::new(*v, *v)),
+        EmlNode::Var(i) => Some(
+            vars.get(*i)
+                .copied()
+                .unwrap_or_else(|| Interval::new(-10.0, 10.0)),
+        ),
         EmlNode::Eml { left, right } => {
-            let l = eval_interval(left, vars);
-            let r = eval_interval(right, vars);
+            let l = eval_interval(left, vars)?;
+            let r = eval_interval(right, vars)?;
+            // Genuinely empty variable domain ⇒ propagate emptiness (sound).
             if l.is_empty() || r.is_empty() {
-                return Interval::new(f64::INFINITY, f64::NEG_INFINITY);
+                return Some(Interval::new(f64::INFINITY, f64::NEG_INFINITY));
+            }
+            // ln(r) is real-analytic only when r is strictly positive and finite.
+            // If r reaches <= 0 (or is unbounded), the EML value may be a real
+            // number via complex cancellation — real interval arithmetic cannot
+            // decide, so report indeterminate rather than empty.
+            if r.lo <= 0.0 || !r.lo.is_finite() || !r.hi.is_finite() {
+                return None;
             }
             let exp_l = l.exp();
             let ln_r = r.ln();
-            if ln_r.is_empty() {
-                return Interval::new(f64::INFINITY, f64::NEG_INFINITY);
-            }
             // eml(l, r) = exp(l) − ln(r)
-            // min = exp(l.lo) − ln(r.hi)
-            // max = exp(l.hi) − ln(r.lo)
-            Interval::new(exp_l.lo - ln_r.hi, exp_l.hi - ln_r.lo)
+            Some(Interval::new(exp_l.lo - ln_r.hi, exp_l.hi - ln_r.lo))
         }
     }
 }
@@ -236,19 +249,25 @@ fn backward_propagate(
         }
         EmlNode::Eml { left, right } => {
             // out = exp(left) - ln(right)
-            let left_iv = eval_interval(left, vars);
-            let right_iv = eval_interval(right, vars);
+            let (Some(left_iv), Some(right_iv)) =
+                (eval_interval(left, vars), eval_interval(right, vars))
+            else {
+                // A child subtree can't be soundly bounded ⇒ don't tighten, don't conflict.
+                return PropResult::Stable;
+            };
 
             if left_iv.is_empty() || right_iv.is_empty() {
                 return PropResult::Conflict;
             }
 
+            // ln(right) needs `right` strictly positive & finite; otherwise this node's
+            // relation is not real-analytic here ⇒ indeterminate, never a conflict.
+            if right_iv.lo <= 0.0 || !right_iv.lo.is_finite() || !right_iv.hi.is_finite() {
+                return PropResult::Stable;
+            }
+
             let exp_l = left_iv.exp();
             let ln_r = right_iv.ln();
-
-            if ln_r.is_empty() {
-                return PropResult::Conflict;
-            }
 
             // Forward output: [exp_l.lo - ln_r.hi, exp_l.hi - ln_r.lo]
             let forward_out = Interval::new(exp_l.lo - ln_r.hi, exp_l.hi - ln_r.lo);
@@ -265,8 +284,14 @@ fn backward_propagate(
             if exp_l_c.is_empty() {
                 return PropResult::Conflict;
             }
-            // left = ln(exp_l_c) (monotone inverse)
-            let left_c = left_iv.intersect(&exp_l_c.exp_inv());
+            // left = ln(exp_l_c) (monotone inverse). `exp_inv` is `ln`, which empties
+            // when `exp_l_c.lo <= 0`; an un-invertible `ln` must yield no tightening
+            // rather than a spurious conflict.
+            let left_c = if exp_l_c.lo > 0.0 {
+                left_iv.intersect(&exp_l_c.exp_inv())
+            } else {
+                left_iv
+            };
 
             // Back-propagate to ln(right):
             // ln(right) = exp(left) - out
@@ -296,7 +321,10 @@ fn backward_propagate(
 fn propagate_once(vars: &mut [Interval], c: &EmlConstraint) -> PropResult {
     match c {
         EmlConstraint::EqZero(tree) => {
-            let v = eval_interval(&tree.root, vars);
+            let v = match eval_interval(&tree.root, vars) {
+                Some(v) => v,
+                None => return PropResult::Stable, // indeterminate ⇒ no conflict, no tightening
+            };
             if v.is_empty() {
                 return PropResult::Conflict;
             }
@@ -307,7 +335,10 @@ fn propagate_once(vars: &mut [Interval], c: &EmlConstraint) -> PropResult {
             backward_propagate(&tree.root, vars, Interval::new(0.0, 0.0))
         }
         EmlConstraint::GtZero(tree) => {
-            let v = eval_interval(&tree.root, vars);
+            let v = match eval_interval(&tree.root, vars) {
+                Some(v) => v,
+                None => return PropResult::Stable, // indeterminate ⇒ no conflict, no tightening
+            };
             if v.is_empty() {
                 return PropResult::Conflict;
             }
@@ -320,7 +351,10 @@ fn propagate_once(vars: &mut [Interval], c: &EmlConstraint) -> PropResult {
             backward_propagate(&tree.root, vars, out_c)
         }
         EmlConstraint::GeZero(tree) => {
-            let v = eval_interval(&tree.root, vars);
+            let v = match eval_interval(&tree.root, vars) {
+                Some(v) => v,
+                None => return PropResult::Stable, // indeterminate ⇒ no conflict, no tightening
+            };
             if v.is_empty() {
                 return PropResult::Conflict;
             }
@@ -332,7 +366,10 @@ fn propagate_once(vars: &mut [Interval], c: &EmlConstraint) -> PropResult {
             backward_propagate(&tree.root, vars, out_c)
         }
         EmlConstraint::LtZero(tree) => {
-            let v = eval_interval(&tree.root, vars);
+            let v = match eval_interval(&tree.root, vars) {
+                Some(v) => v,
+                None => return PropResult::Stable, // indeterminate ⇒ no conflict, no tightening
+            };
             if v.is_empty() {
                 return PropResult::Conflict;
             }
@@ -347,7 +384,10 @@ fn propagate_once(vars: &mut [Interval], c: &EmlConstraint) -> PropResult {
             backward_propagate(&tree.root, vars, out_c)
         }
         EmlConstraint::LeZero(tree) => {
-            let v = eval_interval(&tree.root, vars);
+            let v = match eval_interval(&tree.root, vars) {
+                Some(v) => v,
+                None => return PropResult::Stable, // indeterminate ⇒ no conflict, no tightening
+            };
             if v.is_empty() {
                 return PropResult::Conflict;
             }
@@ -362,7 +402,10 @@ fn propagate_once(vars: &mut [Interval], c: &EmlConstraint) -> PropResult {
         }
         EmlConstraint::NeZero(tree) => {
             use super::helpers::NEZERO_EPS;
-            let v = eval_interval(&tree.root, vars);
+            let v = match eval_interval(&tree.root, vars) {
+                Some(v) => v,
+                None => return PropResult::Stable, // indeterminate ⇒ no conflict, no tightening
+            };
             if v.is_empty() {
                 return PropResult::Conflict;
             }

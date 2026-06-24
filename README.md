@@ -324,6 +324,20 @@ Released 2026-06-15.
 - **WASM Bindings** — `exhaustive()` preset added; curated browser subset:
   `parse_and_eval`, `to_latex_wasm`, `integrate_definite_wasm`, `solve_for_all_wasm`
 
+## What's New in v0.1.3
+
+Released 2026-06-25.
+
+- **SMT soundness fix ([#1](https://github.com/cool-japan/oxieml/issues/1))** — `EmlSmtSolver::check_sat`
+  (feature `smt`) no longer returns a spurious `Unsat` for satisfiable constraints. When interval
+  propagation reached an intermediate `ln` of a non-positive operand — legitimate in EML's complex-domain
+  `sub`/`ln` constructions, where the imaginary parts cancel and the final real value is well-defined — the
+  real-domain interval layer previously treated the empty `ln` result as a conflict. It now treats it as
+  **indeterminate** (`eval_interval -> Option<Interval>`), so `Unsat` is returned only for genuinely
+  infeasible constraints (e.g. `ln(x) > 0` on a strictly-negative domain now returns `Unknown`). Interval-only
+  symbolic-regression pruning (`smt_prune`) is correspondingly more conservative and can no longer discard a
+  satisfiable topology.
+
 ## Canonical Constructions (Complete Phylogenetic Tree)
 
 All functions from the paper's phylogenetic tree (Figure 1) are implemented:
@@ -521,7 +535,7 @@ scales near-linearly on large batches (100K+ points).
 
 ## Test Coverage
 
-737 tests covering:
+739 tests covering:
 - Canonical tree construction (correctness, complex, symbolic)
 - Lowering, compilation, pretty-print, LaTeX
 - Symbolic gradient, Jacobian, Hessian (central-difference cross-checks)
@@ -538,7 +552,7 @@ scales near-linearly on large batches (100K+ points).
 - CLI integration (eval, lower, grad, symreg, format, output flags)
 
 ```bash
-cargo nextest run --all-features    # 737 tests
+cargo nextest run --all-features    # 739 tests
 cargo clippy --all-targets --all-features -- -D warnings   # zero warnings
 cargo bench --features simd,parallel                       # criterion benchmarks
 ```

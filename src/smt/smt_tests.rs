@@ -30,15 +30,20 @@ fn test_smt_ln_bracket() {
 }
 
 #[test]
-fn test_smt_unsat_ln_of_negative() {
-    // ln(x) > 0 with x in [-2, -1] is unsat (ln undefined on that domain).
+fn test_smt_ln_of_negative_is_unknown_not_unsat() {
+    // ln(x) > 0 with x ∈ [-2, -1]: `Canonical::ln` builds an EML tree whose real
+    // value is non-real over this domain (ln of a negative operand), so real
+    // interval arithmetic CANNOT soundly certify infeasibility. The old solver
+    // claimed `Unsat` via the (unsound) "empty ⇒ conflict" mechanism; after the
+    // fix the `ln`-of-non-positive operand is treated as indeterminate and the
+    // solver honestly returns `Unknown` instead of a spurious `Unsat`.
     let x = EmlTree::var(0);
     let ln_x = Canonical::ln(&x);
     let c = EmlConstraint::GtZero(ln_x);
     let solver = EmlSmtSolver::new(vec![(-2.0, -1.0)]);
     assert!(matches!(
         solver.check_sat(&c).expect("check_sat error"),
-        SmtResult::Unsat
+        SmtResult::Unknown
     ));
 }
 
@@ -292,9 +297,14 @@ mod j1_j3_tests {
     // ── J3: Or hull tightening ────────────────────────────────────────────
 
     #[test]
-    fn or_all_infeasible_yields_conflict() {
-        // Or([exp(x) < 0, ln(x) > 0 where x ∈ [-2,-1]])
-        // Both branches infeasible → Conflict.
+    fn or_with_indeterminate_branch_not_conflict() {
+        // Or([exp(x) < 0, ln(x) > 0]) with x ∈ [-2,-1].
+        // Branch exp(x) < 0 is genuinely infeasible (exp > 0 everywhere).
+        // Branch ln(x) > 0 is INDETERMINATE: `Canonical::ln` applies `ln` to a
+        // negative operand, which real interval arithmetic cannot soundly bound,
+        // so it is no longer treated as a (false) infeasibility. With one branch
+        // indeterminate, the Or is not provably a conflict — `propagate` must NOT
+        // return Conflict (the sound fix that avoids the false-Unsat mechanism).
         let x = EmlTree::var(0);
         let one = EmlTree::one();
         let exp_x = EmlTree::eml(&x, &one);
@@ -303,15 +313,15 @@ mod j1_j3_tests {
         let c = EmlConstraint::Or(vec![
             // exp(x) < 0 — always false
             EmlConstraint::LtZero(exp_x),
-            // ln(x) > 0 with x ∈ [-2,-1] — domain makes ln undefined
+            // ln(x) > 0 with x ∈ [-2,-1] — indeterminate (ln of negative operand)
             EmlConstraint::GtZero(ln_x),
         ]);
         let mut domain = IntervalDomain::new(&[(-2.0, -1.0)], 1);
         let result = domain.propagate(&c);
-        assert_eq!(
+        assert_ne!(
             result,
             PropResult::Conflict,
-            "Both Or-branches infeasible → Conflict"
+            "ln(x)>0 branch is indeterminate (not provably infeasible) → no Conflict"
         );
     }
 

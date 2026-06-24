@@ -636,6 +636,13 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Risk:** soundness — backward rules only INTERSECT, use outward rounding. Property test: no
     satisfying point discarded.
 
+- [x] **Issue #1 — SMT soundness: spurious `Unsat` from real-domain `ln` of a non-positive interval** (fixed 2026-06-25, post-release follow-up; [#1](https://github.com/cool-japan/oxieml/issues/1))
+  - **Goal:** `EmlSmtSolver::check_sat` must never return `Unsat` for a satisfiable constraint. The Phase-1 interval propagator turned `Interval::ln` of a non-positive interval (empty) into a `Conflict`, but EML's `Canonical::sub`/`ln` constructions legitimately evaluate such an intermediate `ln` in the complex domain — so the real interval layer must treat it as INDETERMINATE, never infeasible.
+  - **Design:** `eval_interval(node, vars) -> Option<Interval>` returns `None` (indeterminate) when `ln` reaches `<= 0`/non-finite; the six atomic arms map `None -> PropResult::Stable`; `backward_propagate`'s `Eml` arm guards the `ln`-operand and skips back-substitution rather than conflicting. `Interval::ln`'s empty sentinel is unchanged. Net effect: strictly fewer (only sound) `Unsat`/`Conflict` verdicts; `ln(x)>0` on negative domains now returns `Unknown`.
+  - **Files:** `src/smt/interval.rs` (the fix), `src/smt/smt_tests.rs` (2 tests corrected to assert sound results), `tests/smt_issue1_const_ln_operand_test.rs` (new regression — interval-layer anchor + 7 issue cases with verified witnesses).
+  - **Tests:** interval propagation never spuriously `Conflict`s on `{le,ge,lt,gt,eq}(f,0)` for `f=exp(x0)-1`; all seven issue cases sound (g-cases decidable, f-cases never `Unsat` and `Sat` with a re-verified witness).
+  - **Risk:** precision trade-off (some previously-`Unsat` cases now `Unknown`) accepted — `Unknown` is always sound, a false `Unsat` is not.
+
 - [x] **F3 — Richer constraint language** (planned 2026-06-13)
   - **Goal:** Extend `EmlConstraint` with `Not(Box<…>)`, `LtZero`/`LeZero`/`NeZero`, binary
     tree-vs-tree `Lt`/`Le`/`Gt`/`Ge`/`Eq`/`Ne`. Quantifier-free. NNF pass.
