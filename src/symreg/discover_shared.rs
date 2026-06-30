@@ -6,7 +6,7 @@
 
 use crate::tree::EmlTree;
 
-use super::constants::bake_params_into_lowered;
+use super::constants::{bake_params_into_lowered, bake_params_into_tree};
 use super::topology::{dedupe_by_semantics, enumerate_topologies_gated};
 use super::{DiscoveredFormula, SharedFormula, SymRegEngine};
 
@@ -201,7 +201,7 @@ pub(super) fn shared_to_multi_result(
             let aic = n * rss_per_n.ln() + 2.0 * k;
             let bic = n * rss_per_n.ln() + k * n.max(1.0_f64).ln();
             let df = DiscoveredFormula {
-                eml_tree: sf.eml_tree.clone(),
+                eml_tree: bake_params_into_tree(&sf.eml_tree, params),
                 mse,
                 complexity,
                 score,
