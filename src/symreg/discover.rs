@@ -696,7 +696,7 @@ impl SymRegEngine {
         let (aic, bic) = compute_aic_bic(final_mse, inputs.len(), best_params.len());
 
         Some(DiscoveredFormula {
-            eml_tree: topology.clone(),
+            eml_tree: super::constants::bake_params_into_tree(topology, &best_params),
             mse: final_mse,
             complexity,
             score: final_mse + self.config.complexity_penalty * complexity as f64,

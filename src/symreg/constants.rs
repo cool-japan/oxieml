@@ -57,6 +57,23 @@ pub(super) fn bake_params_into_lowered(topology: &EmlTree, params: &[f64]) -> Lo
     replace_const_one(&lowered, params, &mut param_idx)
 }
 
+/// Bake learned parameters directly into an `EmlTree`, replacing each `One`/
+/// `Const` leaf (in left-to-right traversal order) with the corresponding
+/// fitted value from `params`.
+///
+/// This is the `EmlTree`-level counterpart to [`bake_params_into_lowered`]:
+/// callers that need a self-contained, directly-evaluable `EmlTree` (rather
+/// than a `LoweredOp`) for a [`crate::symreg::DiscoveredFormula`] should use
+/// this instead of returning the bare, unparameterized topology.
+pub(super) fn bake_params_into_tree(topology: &EmlTree, params: &[f64]) -> EmlTree {
+    if params.is_empty() {
+        return topology.clone();
+    }
+    let mut idx = 0usize;
+    let new_root = substitute_params(&topology.root, params, &mut idx);
+    EmlTree::from_node(new_root)
+}
+
 fn substitute_params(
     node: &crate::tree::EmlNode,
     params: &[f64],
