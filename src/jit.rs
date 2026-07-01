@@ -11,7 +11,7 @@
 mod inner {
     use cranelift_codegen::ir::types::F64;
     use cranelift_codegen::ir::{
-        AbiParam, Function, InstBuilder, MemFlags, Signature, UserFuncName,
+        AbiParam, Function, InstBuilder, MemFlagsData, Signature, UserFuncName,
     };
     use cranelift_codegen::isa::CallConv;
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -399,7 +399,7 @@ mod inner {
                     .map_err(|_| format!("Var index {i} too large for i32 offset"))?;
                 let v = builder
                     .ins()
-                    .load(F64, MemFlags::trusted(), vars_ptr, offset);
+                    .load(F64, MemFlagsData::trusted(), vars_ptr, offset);
                 vstack.push(v);
             }
             OxiOp::Add => {
