@@ -19,7 +19,13 @@ rand = "0.10"
 rayon = { version = "1.12", optional = true }
 oxiblas-core = { version = "0.2.1", optional = true, default-features = false, features = ["std"] }
 oxiz = { version = "0.2.3", optional = true, default-features = false, features = ["std"] }
-num-rational = { version = "0.4" }
+# NOTE: pinned to the 0.4.x line (not the newer 0.5.x major published on crates.io)
+# on purpose: num-rational 0.4.2's `BigRational` alias and oxiz 0.2.3 both depend on
+# num-bigint ^0.4 internally. Using 0.5.x here would give oxieml's own `BigInt` a
+# different concrete type than the one inside `BigRational`/oxiz, breaking interop.
+num-bigint = "0.4"
+num-integer = "0.1"
+num-rational = { version = "0.4", features = ["num-bigint-std"] }
 tensorlogic-ir = { version = "0.1.1", optional = true }
 scirs2-core = { version = "0.6.0", optional = true, default-features = false, features = ["std"] }
 ndarray = { version = "0.17.2", optional = true, default-features = false, features = ["std"] }
@@ -33,6 +39,7 @@ cranelift-codegen = { version = "0.133.1", optional = true }
 cranelift-frontend = { version = "0.133.1", optional = true }
 cranelift-jit = { version = "0.133.1", optional = true }
 cranelift-module = { version = "0.133.1", optional = true }
+clap = { version = "4.6.1", optional = true, features = ["derive"] }
 
 [dev-dependencies]
 criterion = "0.8"
@@ -42,8 +49,18 @@ predicates = "3.1"
 proptest = "1.11"
 
 [features]
-default = []
+# `cli` is in `default` because the `oxieml` binary target below is gated with
+# `required-features = ["cli"]`. Without `cli` in `default`, a plain
+# `cargo build` / `cargo nextest run` (no explicit `--features`) would silently
+# skip building the binary, and both `tests/cli_format_test.rs` and
+# `tests/cli_symreg_test.rs` (which locate it via `assert_cmd::Command::cargo_bin`)
+# would fail. The lib itself stays pure: consumers who only want the library
+# (e.g. `--no-default-features`, or depending on `oxieml` as a lib dependency
+# without pulling in its `[dependencies]` default set) are unaffected — `cli`
+# only pulls in `clap`, never touches the public `lib.rs` API surface.
+default = ["cli"]
 smt = ["dep:oxiz"]
+smt-opt = ["smt", "oxiz/optimization"]
 simd = ["dep:oxiblas-core"]
 parallel = ["dep:rayon"]
 tensorlogic = ["dep:tensorlogic-ir"]
@@ -53,6 +70,7 @@ python = ["dep:pyo3", "dep:numpy"]
 python-extension = ["python", "pyo3/extension-module"]
 wasm = ["dep:wasm-bindgen"]
 jit = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-jit", "dep:cranelift-module"]
+cli = ["dep:clap"]
 
 [lib]
 name = "oxieml"
@@ -61,6 +79,7 @@ crate-type = ["rlib"]
 [[bin]]
 name = "oxieml"
 path = "src/bin/oxieml.rs"
+required-features = ["cli"]
 
 [[bench]]
 name = "eval_bench"

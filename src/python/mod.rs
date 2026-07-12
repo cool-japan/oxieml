@@ -198,6 +198,9 @@ pub fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Solving
     m.add_function(wrap_pyfunction!(solve::solve_for_all_py, m)?)?;
     m.add_function(wrap_pyfunction!(solve::solve_polynomial_complex_py, m)?)?;
+    m.add_function(wrap_pyfunction!(solve::solve_system_py, m)?)?;
+    m.add_function(wrap_pyfunction!(solve::groebner_basis_py, m)?)?;
+    m.add_function(wrap_pyfunction!(solve::ideal_member_py, m)?)?;
 
     // Special / numeric functions
     m.add_function(wrap_pyfunction!(numeric::erf_py, m)?)?;

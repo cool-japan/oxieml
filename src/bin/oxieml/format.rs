@@ -26,7 +26,7 @@ pub(super) const KNOWN_CONSTANTS: &[(&str, f64)] = &[
 ];
 
 /// Selects the output representation for results.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(super) enum OutputFormat {
     /// Human-readable mathematical notation (default).
     Pretty,
@@ -34,6 +34,31 @@ pub(super) enum OutputFormat {
     Latex,
     /// Hand-rolled JSON with a stable `version:1` envelope.
     Json,
+}
+
+/// Shared `--format` / `--output` flags, flattened into every clap subcommand
+/// that produces a formula-shaped result (as opposed to `grad`/`symreg`, which
+/// have their own established output conventions preserved from the legacy CLI).
+#[derive(Debug, Clone, clap::Args)]
+pub(super) struct OutputArgs {
+    /// Output format: pretty (default), latex, json.
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
+    /// Write output to file instead of stdout.
+    #[arg(long)]
+    output: Option<std::path::PathBuf>,
+}
+
+impl OutputArgs {
+    /// The requested format, defaulting to [`OutputFormat::Pretty`].
+    pub(super) fn format(&self) -> OutputFormat {
+        self.format.unwrap_or(OutputFormat::Pretty)
+    }
+
+    /// The requested output path, if any.
+    pub(super) fn output(&self) -> Option<std::path::PathBuf> {
+        self.output.clone()
+    }
 }
 
 impl OutputFormat {

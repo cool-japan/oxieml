@@ -782,7 +782,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
 
 ### Extended scope (round 4)
 
-- [~] **N1 — BigRational/BigInt coefficient backend for `poly/`** (planned 2026-06-15)
+- [x] **N1 — BigRational/BigInt coefficient backend for `poly/`** (implemented 2026-07-11)
   - **Goal:** Every `poly/` op (`add/sub/mul/pow/div_rem/gcd/resultant/discriminant/content/square_free/rational_roots`) is exact and **never returns `CoeffOverflow`** for any in-ℚ input; `resultant`/`discriminant` return exact arbitrary-precision values; `f64_to_ratio` rationalizes with no denom≤1000 cap.
   - **Design:** Switch the coefficient type directly to `num_rational::BigRational` (type alias `pub type Coeff = BigRational` in poly/mod.rs). Delete the four `checked_*` helpers. Keep `PolyError::CoeffOverflow` variant but stop constructing it. `f64_to_ratio` becomes continued-fraction/Stern–Brocot rationalization. Add `Poly::from_int_coeffs(&[i64])`/`from_ratios(Vec<BigRational>)` constructors.
   - **Files:** Cargo.toml (add `num-bigint = "0.4.6"`, `num-integer = "0.1.46"`); src/poly/{mod,univariate,multivariate,factor,sturm,tests}.rs; src/integrate.rs, src/solve_poly.rs, src/integrate_subst.rs.
@@ -790,7 +790,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** overflow elimination `[(10^18)x+1]^3` succeeds; exact `res(x²−2,x²−3)==1`, `disc(x²+bx+c)==b²−4c` for `b=10^10`; `f64_to_ratio` for `1/3`, `355/113`, `0.1→1/10`, `NaN→Err`; full existing poly/solve suite green.
   - **Risk:** public field type change mitigated by ergonomic constructors + 2 raw-site updates; perf acceptable (poly/ is not the symreg hot path).
 
-- [~] **N2 — Modern univariate factorization over ℚ (Cantor–Zassenhaus + Hensel + Zassenhaus)** (planned 2026-06-15)
+- [x] **N2 — Modern univariate factorization over ℚ (Cantor–Zassenhaus + Hensel + Zassenhaus)** (implemented 2026-07-11)
   - **Goal:** `Poly::factor()` returns the full irreducible factorization over ℚ for **arbitrary degree** (replacing deg≤6 Kronecker), correct on Swinnerton-Dyer / cyclotomic / many-factor inputs, polynomial-time except documented worst-case recombination.
   - **Design:** New `src/poly/modular.rs` (`ModPoly`: GF(p)/ℤ/pᵏ arithmetic via `i128`). New `src/poly/factor_zassenhaus.rs`: prime selection → distinct-degree factorization → Cantor–Zassenhaus EDF → multifactor Hensel lifting (quadratic Newton, Bézout cofactors) → Mignotte bound → Zassenhaus recombination. Delete Kronecker helpers.
   - **Files:** src/poly/modular.rs (new), src/poly/factor_zassenhaus.rs (new), src/poly/factor.rs, src/poly/mod.rs, src/poly/tests.rs.
@@ -798,7 +798,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** `x²−2` irreducible; SD(2,3) `x⁴−10x²+1` irreducible; `(x²+1)(x²+x+1)(x³−2)` → all three; cyclotomics `Φ₈`, `x⁶−1`; degree-10 `∏(x−k)`; property re-multiply == original.
   - **Risk:** recombination blow-up → subset cap + fallback; EDF randomness → seeded in tests; prime exhaustion → fall back to `[f]` with doc note.
 
-- [~] **N3 — Gröbner bases (Buchberger) + multivariate nonlinear system solving** (planned 2026-06-15)
+- [x] **N3 — Gröbner bases (Buchberger) + multivariate nonlinear system solving** (implemented 2026-07-11)
   - **Goal:** Correct **reduced Gröbner basis** under lex/grlex/grevlex; **ideal membership**; nonlinear system solving so `{x²+y²=1, x=y}` returns actual roots instead of `SystemSolveResult::Nonlinear`.
   - **Design:** New `src/poly/monomial.rs` (`Monomial(Vec<u32>)` + `MonOrder{Lex,GrLex,GrevLex}`). Extend multivariate.rs with order-aware `leading_term`/`reduce`/`s_polynomial`. New `src/poly/groebner.rs` (Buchberger + both criteria + minimalize + reduce). New `src/poly/solve_system.rs` (`solve_zero_dim` via lex elimination + back-substitution). New `SystemSolveResult::NonlinearSolutions(Vec<Vec<LoweredOp>>)` variant in solve.rs.
   - **Files:** src/poly/{monomial,groebner,solve_system}.rs (new), src/poly/multivariate.rs, src/poly/mod.rs, src/solve.rs, src/lib.rs, src/python/solve.rs.
@@ -806,7 +806,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** `⟨x²+y²−1, x−y⟩` lex GB → solutions `(±1/√2,±1/√2)`; ideal membership (`xy∈⟨x,y⟩` true, `1∈⟨x,y⟩` false); Product-criterion prunes `⟨x²,y³⟩`; end-to-end nonlinear solve; linear regression intact.
   - **Risk:** doubly-exponential worst case → degree/pair caps + documented timeout; new `SystemSolveResult` arm is compiler-enforced.
 
-- [~] **O1 — Symbolic linear algebra (`src/matrix.rs` new)** (planned 2026-06-15)
+- [x] **O1 — Symbolic linear algebra (`src/matrix.rs` new)** (implemented 2026-07-11)
   - **Goal:** `Matrix` over symbolic `LoweredOp` entries with **Bareiss fraction-free exact determinant**, rref/nullspace, **Faddeev–LeVerrier charpoly** (det+inverse as by-products), eigenvalues, eigenvectors, symbolic inverse.
   - **Design:** `Matrix{rows,cols,data:Vec<LoweredOp>}` row-major. Symbolic zero-test 3-tier oracle (structural simplify → Schwartz–Zippel probing → ProbablyZero). Bareiss exact det routed through `MultiPoly` exact division. Faddeev–LeVerrier charpoly (only integer divisions). `verify()` safety net. Cap symbolic path at n≤8. Split into `src/matrix/` if > 2000 lines.
   - **Files:** src/matrix.rs (or src/matrix/ package), src/lib.rs.
@@ -822,7 +822,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** `Σk=n(n+1)/2`, `Σk²`, `Σk³`, `Σ2ᵏ=2^{n+1}−1`, `Σk·k!=(n+1)!−1` (Gosper), `Σ1/(k(k+1))=n/(n+1)` (telescope); property verify at 6 probes; `Σ1/k→NotClosedForm`.
   - **Risk:** i64 overflow → checked/f64 fallback (eased by N1); no IR variant → zero match-arm churn.
 
-- [~] **P2 — Algebraic rewriting API: expand/factor/collect/apart/together/powsimp/logcombine** (planned 2026-06-15)
+- [x] **P2 — Algebraic rewriting API: expand/factor/collect/apart/together/powsimp/logcombine** (implemented 2026-07-11)
   - **Goal:** Seven never-panic `impl LoweredOp` methods: `expand`, `factor`, `collect(var)`, `apart` (partial fractions), `together`, `powsimp`, `logcombine`.
   - **Design:** New `src/rewrite/{mod,expand,factor,collect,apart,logexp}.rs`. `expand` via `MultiPoly` round-trip with local `EXPAND_MAX_TERMS` (~4096). `apart` = shared `partial_fractions` helper lifted from integrate.rs:651-890, upgraded to `Poly::factor`. `integrate_rational` refactored to call shared `partial_fractions`. `logcombine` delegates to `logexp.rs`.
   - **Files:** src/rewrite/ (new), src/lib.rs, src/integrate.rs (refactor + relocate `gaussian_eliminate`).
@@ -854,7 +854,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** `laurent(1/x,0)` leading `x⁻¹`; `laurent(1/sin x,0)→x⁻¹+x/6`; `lim x·ln x=0` (0·∞); `lim(1+1/x)^x=e` (1^∞); `lim sin(1/x)→DoesNotExist`; `laurent(ln x,0)→Err(BranchPoint)`.
   - **Risk:** pole-order noise → symbolic cross-check + cap m≤10; existing `test_taylor_undefined_at_point` stays valid.
 
-- [~] **R1 — Parallel fitness evaluation (root-parallel MCTS + intra-island GA fitness)** (planned 2026-06-15)
+- [x] **R1 — Parallel fitness evaluation (root-parallel MCTS + intra-island GA fitness)** (implemented 2026-07-11)
   - **Goal:** Under `feature=parallel`, MCTS rollouts and intra-island GA fitness run on the rayon pool; with fixed `config.seed` results are **byte-identical** to single-thread.
   - **Design:** MCTS root-parallel: batch simulation phase via `chunk.par_iter().map(rollout_once)`, backprop in deterministic chunk order. GA two-phase map-then-merge: read-only cache lookup before parallel region, `par_iter` `optimize_topology`, write back in ascending-slot order. All `par_iter` `#[cfg(feature="parallel")]` with sequential twin.
   - **Files:** src/symreg/mcts.rs (extract `rollout_once`, chunked parallel sim), src/symreg/evolution.rs (two-phase parallel fitness).
@@ -862,7 +862,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** parallel==sequential bit-for-bit (seed=42); thread-count invariance (`RAYON_NUM_THREADS=1` vs `8`).
   - **Risk:** non-associative float → never reduce floats across tasks; verified `optimize_topology` has no global state.
 
-- [~] **R2 — Proper NSGA-II multi-objective symbolic regression** (planned 2026-06-15)
+- [x] **R2 — Proper NSGA-II multi-objective symbolic regression** (implemented 2026-07-11)
   - **Goal:** Selectable NSGA-II mode returning full non-dominated front annotated with (rank, crowding). Existing `pareto_front`/`discover_pareto` kept.
   - **Design:** New `src/symreg/nsga2.rs`. Fast-nondominated-sort O(MN²) + crowding distance + crowded-comparison + (μ+λ) selection. Expose `discover_nsga2(...)->Vec<RankedFormula>`.
   - **Files:** src/symreg/nsga2.rs (new), src/symreg/mod.rs.
@@ -870,7 +870,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** textbook fast-nondominated-sort ranks; rank-0 == `pareto_front` on same pool; crowding boundary `+∞`; determinism parallel==sequential.
   - **Risk:** crowding div-by-zero → explicit skip; NaN MSE → treat as worst.
 
-- [~] **R3 — JIT batch/SIMD evaluation path** (planned 2026-06-15)
+- [x] **R3 — JIT batch/SIMD evaluation path** (implemented 2026-07-11)
   - **Goal:** `JitFn::call_batch(rows,n_rows,stride,out)` emits a Cranelift internal loop (one compile, N rows); `call_batch_parallel` splits via rayon. Scalar `call` unchanged. Transcendentals stay scalar host calls.
   - **Design:** Tier 1: compile `fn(in_ptr,n_rows,stride,out_ptr)` reusing `emit_op` with per-iteration `row_base`; `header/body/exit` block loop. Tier 2 (optional): vectorize only `{Const,Var,Add,Sub,Mul,Div,Neg,int-Pow}` via `is_vectorizable`.
   - **Files:** src/jit.rs (batch codegen + `call_batch`/`call_batch_parallel`).
@@ -878,7 +878,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** `call_batch` == per-row `call` (1000 rows, 0 ULP); parallel == batch (thread-invariant); malformed stride/len asserts.
   - **Risk:** Cranelift block-sealing → strict `seal_block` discipline; n_rows∈{0,1,2,large} test.
 
-- [~] **S1 — Incremental SMT (solver reuse + push/pop) + MaxSMT + unsat-core** (planned 2026-06-15)
+- [x] **S1 — Incremental SMT (solver reuse + push/pop) + MaxSMT + unsat-core** (implemented 2026-07-11)
   - **Goal:** Symreg pruner reuses one live OxiZ `Solver` via push/pop; `EmlSmtSolver::max_smt` maximizes satisfied soft constraints; `unsat_core` returns a minimal infeasible subset.
   - **Design:** New `IncrementalEmlSolver` (persistent `TermManager`+`Solver`+`var_terms`); per candidate `push()`→encode→assert→check→`pop()`. MaxSMT via `oxiz::opt` RC2 behind `smt-opt = ["smt","oxiz/optimization"]` feature + pure greedy fallback under base `smt`. Unsat-core via `minimize_unsat_core`. New `smt/{incremental,maxsmt,core,encode}.rs`.
   - **Files:** src/smt/{incremental,maxsmt,core}.rs (new), src/smt/oxiz_backend.rs, src/smt/mod.rs, src/symreg/smt_prune.rs, Cargo.toml (`smt-opt`).
@@ -894,7 +894,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** `Python::with_gil` smoke per `Py*` class; `wasm-bindgen-test` round-trips; Python import smoke.
   - **Risk:** ABI break → keep `_core` + `abi3` tags; `unwrap` creep → clippy `-D warnings`.
 
-- [~] **T2 — clap-based CLI + REPL + subcommands** (planned 2026-06-15)
+- [x] **T2 — clap-based CLI + REPL + subcommands** (implemented 2026-07-11; `repl-rich` raw-mode editing deferred as an explicit opt-in gap)
   - **Goal:** `src/bin/oxieml` uses clap 4 (derive) with subcommands `eval, lower, grad, integrate, solve, simplify, symreg, smt, series, limit, repl`. REPL default is FFI-free (std stdin). Raw-mode editing is opt-in `repl-rich`. Legacy flags preserved via shim.
   - **Design:** `clap = { version = "4", features = ["derive"] }` behind `cli` feature (`[[bin]] required-features=["cli"]`). Legacy shim detects old flags before clap parsing. Default `repl` = std `read_line` loop. `repl-rich` → crossterm/reedline (libc/termios FFI, OS-syscall boundary, not C/C++/Fortran — kept out of default build).
   - **Files:** src/bin/oxieml.rs, src/bin/oxieml/{repl,integrate,solve,simplify,series,limit,smt}.rs (new), Cargo.toml.

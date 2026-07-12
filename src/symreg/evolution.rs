@@ -3,6 +3,36 @@
 //! Implements tournament selection, subtree crossover, and multiple mutation
 //! types. Island populations evolve in parallel (requires the `parallel` feature)
 //! or sequentially, with ring migration between islands.
+//!
+//! # Parallel fitness and bit-for-bit determinism
+//!
+//! Under `feature = "parallel"` two independent levels of parallelism are used:
+//!
+//! * **Island level** — whole islands are independent, so they map cleanly onto
+//!   `par_iter`. `collect()` restores source order, so the reduction that picks
+//!   the global best formula still sees the islands in ascending index order.
+//! * **Intra-island fitness level** — [`evaluate_population`] evaluates a
+//!   generation's individuals with a strict **two-phase map-then-merge**:
+//!
+//!   1. *Prepare (sequential).* Walk the slice in ascending slot order, hash each
+//!      individual, and consult the fitness cache **read-only**. A hit is settled
+//!      immediately; a miss becomes a work item carrying its own index-derived
+//!      `topology_idx` seed.
+//!   2. *Map (parallel or sequential).* `optimize_topology` is applied to the
+//!      work items. It is a pure function of `(config, tree, data, topology_idx)`
+//!      — it seeds its RNG from `(config.seed, topology_idx)` and touches no
+//!      global state — so its `f64` output is bit-identical regardless of which
+//!      thread runs it.
+//!   3. *Merge (sequential).* Results are written back in **ascending slot
+//!      order**, replaying the exact cache semantics of the sequential loop: a
+//!      slot whose hash was inserted by an *earlier* slot of the same generation
+//!      takes the cached formula and discards its own (redundantly computed)
+//!      result. This makes the parallel path bit-identical not only to its own
+//!      sequential twin but to the original single-threaded implementation.
+//!
+//! No `f64` is ever reduced across rayon tasks: fitness values are produced
+//! independently per individual and only ever *compared* (via `sort_by` /
+//! `min_by`, both stable and order-deterministic), never summed.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -274,29 +304,223 @@ fn mutate_const_jitter(tree: &EmlTree, rng: &mut Rng) -> EmlTree {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fitness evaluation with caching
+// Fitness evaluation with caching — two-phase map-then-merge
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn evaluate_individual(
-    ind: &mut Individual,
+/// One fitness evaluation that could not be served from the pre-existing cache.
+struct FitnessTask {
+    /// Index into the population slice. Tasks are built in ascending `slot` order.
+    slot: usize,
+    /// Structural hash of the simplified tree — the fitness-cache key.
+    hash: u64,
+    /// Seed handed to `optimize_topology` as its `topology_idx`.
+    ///
+    /// Derived from `(island_seed, seed_base + slot)`, i.e. purely from indices.
+    /// The optimizer's RNG is a function of this value, never of the worker
+    /// thread, which is what makes the parallel map reproducible.
+    topology_idx: usize,
+    /// Index into `tasks` of the first task with the same `hash`, when this task
+    /// is *not* that first one.
+    ///
+    /// The sequential loop gets duplicates for free: the first individual with a
+    /// given hash populates the cache and every later one reads it back. We
+    /// preserve both that *result* and that *work profile* by only fitting the
+    /// leader, and falling back to fitting the followers themselves in the rare
+    /// case where the leader's fit failed (a failed fit is never cached, so the
+    /// sequential loop would have refitted the follower with its own seed).
+    leader: Option<usize>,
+}
+
+/// Evaluate the fitness of every individual in `individuals` that does not
+/// already carry a formula.
+///
+/// # Determinism
+///
+/// Three strictly separated phases:
+///
+/// 1. **Prepare (sequential).** Ascending slot order; the cache is only *read*.
+///    Because the cache never loses entries, a hash present here would also have
+///    hit in the fully sequential loop, so settling it now is exact.
+/// 2. **Map (parallel under `feature = "parallel"`).** Pure `optimize_topology`
+///    calls; `par_iter().map(...).collect()` over a slice is order-preserving.
+/// 3. **Merge (sequential).** Ascending slot order again. The cache is written
+///    here and only here, reproducing the intra-generation cache hits of the
+///    sequential loop bit for bit.
+///
+/// No floating-point value is ever combined across tasks, so thread count cannot
+/// perturb a single bit of the result.
+fn evaluate_population(
+    individuals: &mut [Individual],
     engine: &SymRegEngine,
     inputs: &[Vec<f64>],
     targets: &[f64],
-    topology_idx: usize,
     cache: &mut HashMap<u64, DiscoveredFormula>,
+    island_seed: u64,
+    seed_base: u64,
 ) {
-    if ind.formula.is_some() {
+    // ── Phase 1: PREPARE (sequential, read-only cache probe) ────────────────
+    let mut tasks: Vec<FitnessTask> = Vec::new();
+    let mut first_by_hash: HashMap<u64, usize> = HashMap::new();
+
+    for (slot, ind) in individuals.iter_mut().enumerate() {
+        if ind.formula.is_some() {
+            continue;
+        }
+        let hash = ind.structural_hash();
+        if let Some(cached) = cache.get(&hash) {
+            ind.formula = Some(cached.clone());
+            continue;
+        }
+        let topology_idx = derive_seed(island_seed, seed_base + slot as u64) as usize;
+        let leader = first_by_hash.get(&hash).copied();
+        if leader.is_none() {
+            first_by_hash.insert(hash, tasks.len());
+        }
+        tasks.push(FitnessTask {
+            slot,
+            hash,
+            topology_idx,
+            leader,
+        });
+    }
+
+    if tasks.is_empty() {
         return;
     }
-    let hash = ind.structural_hash();
-    if let Some(f) = cache.get(&hash) {
-        ind.formula = Some(f.clone());
-        return;
+
+    // ── Phase 2: MAP (rayon pool under `feature = "parallel"`) ──────────────
+    // Immutable reborrow: the parallel region only *reads* the population.
+    let population: &[Individual] = individuals;
+
+    let mut results: Vec<Option<DiscoveredFormula>> = vec![None; tasks.len()];
+
+    // Round A — one fit per distinct structural hash.
+    let leaders: Vec<usize> = (0..tasks.len())
+        .filter(|&i| tasks[i].leader.is_none())
+        .collect();
+    let leader_results = map_fitness(&leaders, &tasks, population, engine, inputs, targets);
+    for (&task_idx, formula) in leaders.iter().zip(leader_results) {
+        results[task_idx] = formula;
     }
-    if let Some(f) = engine.optimize_topology(&ind.tree, inputs, targets, topology_idx) {
-        cache.insert(hash, f.clone());
-        ind.formula = Some(f);
+
+    // Round B — followers whose leader failed to fit. A failed fit is never
+    // cached, so the sequential loop would have refitted these with their own
+    // seed; do exactly that. Usually empty (a `None` fit means a non-finite MSE).
+    let stragglers: Vec<usize> = (0..tasks.len())
+        .filter(|&i| match tasks[i].leader {
+            Some(leader) => results[leader].is_none(),
+            None => false,
+        })
+        .collect();
+    if !stragglers.is_empty() {
+        let straggler_results =
+            map_fitness(&stragglers, &tasks, population, engine, inputs, targets);
+        for (&task_idx, formula) in stragglers.iter().zip(straggler_results) {
+            results[task_idx] = formula;
+        }
     }
+
+    // ── Phase 3: MERGE (sequential, ascending slot order) ───────────────────
+    for (task, computed) in tasks.iter().zip(results) {
+        // A same-hash task at a *lower* slot may just have populated the cache —
+        // the sequential loop would have read it back instead of fitting. Honour
+        // that, and drop this task's own (speculatively computed) result.
+        if let Some(cached) = cache.get(&task.hash) {
+            individuals[task.slot].formula = Some(cached.clone());
+            continue;
+        }
+        if let Some(formula) = computed {
+            cache.insert(task.hash, formula.clone());
+            individuals[task.slot].formula = Some(formula);
+        }
+    }
+}
+
+/// Fit the tasks named by `indices` (indices into `tasks`) on the rayon pool.
+///
+/// `par_iter().map(...).collect()` over a slice is an indexed parallel iterator,
+/// so the returned `Vec` is in `indices` order regardless of work stealing. Each
+/// element is produced independently — rayon never reduces the `f64`s.
+#[cfg(feature = "parallel")]
+fn map_fitness(
+    indices: &[usize],
+    tasks: &[FitnessTask],
+    population: &[Individual],
+    engine: &SymRegEngine,
+    inputs: &[Vec<f64>],
+    targets: &[f64],
+) -> Vec<Option<DiscoveredFormula>> {
+    indices
+        .par_iter()
+        .map(|&i| {
+            let task = &tasks[i];
+            engine.optimize_topology(
+                &population[task.slot].tree,
+                inputs,
+                targets,
+                task.topology_idx,
+            )
+        })
+        .collect()
+}
+
+/// Sequential twin of [`map_fitness`] — same order, same arithmetic, same bits.
+#[cfg(not(feature = "parallel"))]
+fn map_fitness(
+    indices: &[usize],
+    tasks: &[FitnessTask],
+    population: &[Individual],
+    engine: &SymRegEngine,
+    inputs: &[Vec<f64>],
+    targets: &[f64],
+) -> Vec<Option<DiscoveredFormula>> {
+    indices
+        .iter()
+        .map(|&i| {
+            let task = &tasks[i];
+            engine.optimize_topology(
+                &population[task.slot].tree,
+                inputs,
+                targets,
+                task.topology_idx,
+            )
+        })
+        .collect()
+}
+
+/// Map a closure over all islands, on the rayon pool under `feature = "parallel"`.
+///
+/// Islands are fully independent (own RNG stream, own population, own cache), so
+/// this is embarrassingly parallel. `collect()` restores source order, which
+/// keeps the downstream "pick the global best" reduction — a `min_by` over
+/// islands — order-deterministic.
+#[cfg(feature = "parallel")]
+fn map_islands<T, R, F>(items: Vec<T>, f: F) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    F: Fn(usize, T) -> R + Sync + Send,
+{
+    items
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, item)| f(i, item))
+        .collect()
+}
+
+/// Sequential twin of [`map_islands`].
+#[cfg(not(feature = "parallel"))]
+fn map_islands<T, R, F>(items: Vec<T>, f: F) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+    F: Fn(usize, T) -> R + Sync + Send,
+{
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, item)| f(i, item))
+        .collect()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -380,18 +604,16 @@ fn run_island(
 
     let mut state = IslandState::new(population, num_vars, max_depth, const_leaf, &mut rng);
 
-    // Initial evaluation
-    for (i, ind) in state.population.iter_mut().enumerate() {
-        let slot_seed = derive_seed(island_seed, i as u64);
-        evaluate_individual(
-            ind,
-            engine,
-            inputs,
-            targets,
-            slot_seed as usize,
-            &mut state.cache,
-        );
-    }
+    // Initial evaluation (generation 0): seed base 0.
+    evaluate_population(
+        &mut state.population,
+        engine,
+        inputs,
+        targets,
+        &mut state.cache,
+        island_seed,
+        0,
+    );
 
     for generation in 0..generations {
         let mut next_pop: Vec<Individual> = Vec::with_capacity(population);
@@ -454,20 +676,19 @@ fn run_island(
         }
 
         let n_elite = elitism.min(population);
-        for (i, ind) in next_pop[n_elite..].iter_mut().enumerate() {
-            let slot_seed = derive_seed(
-                island_seed,
-                ((generation + 1) * population + n_elite + i) as u64,
-            );
-            evaluate_individual(
-                ind,
-                engine,
-                inputs,
-                targets,
-                slot_seed as usize,
-                &mut state.cache,
-            );
-        }
+        // Two-phase parallel fitness: the non-elite slots of this generation.
+        // Seed base keeps the per-slot `topology_idx` identical to the old
+        // one-at-a-time loop, so seeded results are unchanged.
+        let seed_base = ((generation + 1) * population + n_elite) as u64;
+        evaluate_population(
+            &mut next_pop[n_elite..],
+            engine,
+            inputs,
+            targets,
+            &mut state.cache,
+            island_seed,
+            seed_base,
+        );
 
         state.population = next_pop;
     }
@@ -520,7 +741,7 @@ pub fn run_evolutionary(
     if n_islands == 1 || migration_interval == 0 {
         // Simple case: run all islands independently (no migration needed for single island)
         let states = run_islands_parallel(
-            &island_seeds,
+            island_seeds,
             num_vars,
             config,
             data_xs,
@@ -552,29 +773,22 @@ pub fn run_evolutionary(
         } else {
             None
         };
-        let mut island_states: Vec<IslandState> = island_seeds
-            .iter()
-            .enumerate()
-            .map(|(i, &seed)| {
-                let mut rng = Rng::seed_from_u64(seed);
-                let mut s =
-                    IslandState::new(population, num_vars, config.max_depth, const_leaf, &mut rng);
-                let engine = SymRegEngine::new(config.clone());
-                for (j, ind) in s.population.iter_mut().enumerate() {
-                    let slot_seed = derive_seed(seed, j as u64);
-                    evaluate_individual(
-                        ind,
-                        &engine,
-                        data_xs,
-                        data_ys,
-                        slot_seed as usize,
-                        &mut s.cache,
-                    );
-                }
-                let _ = i; // suppress unused warning
-                s
-            })
-            .collect();
+        let mut island_states: Vec<IslandState> = map_islands(island_seeds, |_, seed| {
+            let mut rng = Rng::seed_from_u64(seed);
+            let mut s =
+                IslandState::new(population, num_vars, config.max_depth, const_leaf, &mut rng);
+            let engine = SymRegEngine::new(config.clone());
+            evaluate_population(
+                &mut s.population,
+                &engine,
+                data_xs,
+                data_ys,
+                &mut s.cache,
+                seed,
+                0,
+            );
+            s
+        });
 
         for epoch in 0..epochs {
             let actual_gens = if epoch == epochs - 1 {
@@ -583,28 +797,24 @@ pub fn run_evolutionary(
                 gens_per_epoch
             };
 
-            let new_states: Vec<IslandState> = island_states
-                .into_iter()
-                .enumerate()
-                .map(|(i, old_state)| {
-                    let seed = derive_seed(master_seed, (epoch * n_islands + i) as u64);
-                    let engine = SymRegEngine::new(config.clone());
-                    run_island_from_state(
-                        old_state,
-                        seed,
-                        num_vars,
-                        config,
-                        data_xs,
-                        data_ys,
-                        &engine,
-                        actual_gens,
-                        tournament_size,
-                        crossover_rate,
-                        mutation_rate,
-                        elitism,
-                    )
-                })
-                .collect();
+            let new_states: Vec<IslandState> = map_islands(island_states, |i, old_state| {
+                let seed = derive_seed(master_seed, (epoch * n_islands + i) as u64);
+                let engine = SymRegEngine::new(config.clone());
+                run_island_from_state(
+                    old_state,
+                    seed,
+                    num_vars,
+                    config,
+                    data_xs,
+                    data_ys,
+                    &engine,
+                    actual_gens,
+                    tournament_size,
+                    crossover_rate,
+                    mutation_rate,
+                    elitism,
+                )
+            });
 
             island_states = new_states;
 
@@ -625,10 +835,10 @@ pub fn run_evolutionary(
     }
 }
 
-/// Run islands in parallel (or sequentially).
+/// Run islands on the rayon pool (or sequentially without `feature = "parallel"`).
 #[allow(clippy::too_many_arguments)]
 fn run_islands_parallel(
-    island_seeds: &[u64],
+    island_seeds: Vec<u64>,
     num_vars: usize,
     config: &SymRegConfig,
     data_xs: &[Vec<f64>],
@@ -640,52 +850,23 @@ fn run_islands_parallel(
     mutation_rate: f64,
     elitism: usize,
 ) -> Vec<IslandState> {
-    #[cfg(feature = "parallel")]
-    {
-        island_seeds
-            .par_iter()
-            .map(|&seed| {
-                let engine = SymRegEngine::new(config.clone());
-                run_island(
-                    seed,
-                    num_vars,
-                    config,
-                    data_xs,
-                    data_ys,
-                    &engine,
-                    population,
-                    generations,
-                    tournament_size,
-                    crossover_rate,
-                    mutation_rate,
-                    elitism,
-                )
-            })
-            .collect()
-    }
-    #[cfg(not(feature = "parallel"))]
-    {
-        island_seeds
-            .iter()
-            .map(|&seed| {
-                let engine = SymRegEngine::new(config.clone());
-                run_island(
-                    seed,
-                    num_vars,
-                    config,
-                    data_xs,
-                    data_ys,
-                    &engine,
-                    population,
-                    generations,
-                    tournament_size,
-                    crossover_rate,
-                    mutation_rate,
-                    elitism,
-                )
-            })
-            .collect()
-    }
+    map_islands(island_seeds, |_, seed| {
+        let engine = SymRegEngine::new(config.clone());
+        run_island(
+            seed,
+            num_vars,
+            config,
+            data_xs,
+            data_ys,
+            &engine,
+            population,
+            generations,
+            tournament_size,
+            crossover_rate,
+            mutation_rate,
+            elitism,
+        )
+    })
 }
 
 /// Continue evolving an existing island state for more generations.
@@ -773,20 +954,19 @@ fn run_island_from_state(
         }
 
         let n_elite = elitism.min(population);
-        for (i, ind) in next_pop[n_elite..].iter_mut().enumerate() {
-            let slot_seed = derive_seed(
-                island_seed,
-                ((generation + 1) * population + n_elite + i) as u64,
-            );
-            evaluate_individual(
-                ind,
-                engine,
-                inputs,
-                targets,
-                slot_seed as usize,
-                &mut state.cache,
-            );
-        }
+        // Two-phase parallel fitness: the non-elite slots of this generation.
+        // Seed base keeps the per-slot `topology_idx` identical to the old
+        // one-at-a-time loop, so seeded results are unchanged.
+        let seed_base = ((generation + 1) * population + n_elite) as u64;
+        evaluate_population(
+            &mut next_pop[n_elite..],
+            engine,
+            inputs,
+            targets,
+            &mut state.cache,
+            island_seed,
+            seed_base,
+        );
 
         state.population = next_pop;
     }
@@ -880,5 +1060,143 @@ mod tests {
             formula.eml_tree.depth() <= 2,
             "depth must not exceed max_depth=2"
         );
+    }
+
+    /// Seeded evolutionary runs must agree on every *bit*, not merely to 1e-12.
+    #[test]
+    fn evolutionary_repeat_run_is_bit_identical() {
+        let inputs: Vec<Vec<f64>> = (0..15).map(|i| vec![i as f64 * 0.2]).collect();
+        let targets: Vec<f64> = inputs.iter().map(|x| x[0] * 2.0 + 1.0).collect();
+        let config = SymRegConfig {
+            max_depth: 2,
+            seed: Some(42),
+            ..SymRegConfig::quick()
+        };
+        let a = run_evolutionary(&inputs, &targets, &config, 12, 4, 3, 0.7, 0.3, 1, 1, 0, 0)
+            .expect("run 1 should succeed");
+        let b = run_evolutionary(&inputs, &targets, &config, 12, 4, 3, 0.7, 0.3, 1, 1, 0, 0)
+            .expect("run 2 should succeed");
+        assert_eq!(a.mse.to_bits(), b.mse.to_bits(), "MSE bits must match");
+        assert_eq!(
+            a.score.to_bits(),
+            b.score.to_bits(),
+            "score bits must match"
+        );
+        assert_eq!(a.pretty, b.pretty, "pretty form must match");
+        let pa: Vec<u64> = a.params.iter().map(|p| p.to_bits()).collect();
+        let pb: Vec<u64> = b.params.iter().map(|p| p.to_bits()).collect();
+        assert_eq!(pa, pb, "parameter bits must match");
+    }
+
+    /// Build a population and the corresponding fitness task list, mirroring
+    /// what the prepare phase of [`evaluate_population`] produces.
+    #[cfg(feature = "parallel")]
+    fn make_fitness_fixture() -> (Vec<Individual>, Vec<FitnessTask>, SymRegConfig) {
+        let config = SymRegConfig {
+            max_depth: 2,
+            seed: Some(42),
+            ..SymRegConfig::quick()
+        };
+        let mut rng = Rng::seed_from_u64(1234);
+        let population: Vec<Individual> = (0..24)
+            .map(|_| Individual::new(random_tree(&mut rng, 1, config.max_depth, None)))
+            .collect();
+        let tasks: Vec<FitnessTask> = population
+            .iter()
+            .enumerate()
+            .map(|(slot, ind)| FitnessTask {
+                slot,
+                hash: ind.structural_hash(),
+                topology_idx: derive_seed(7, slot as u64) as usize,
+                leader: None,
+            })
+            .collect();
+        (population, tasks, config)
+    }
+
+    /// **The parallel == sequential proof at the map level.**
+    ///
+    /// `map_fitness` is the only function whose body differs between the
+    /// `parallel` and non-`parallel` builds of the GA. Here the rayon version and
+    /// the literal body of its sequential twin are run against the same
+    /// population and asserted bit-equal.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn map_fitness_parallel_equals_sequential_bitwise() {
+        let inputs: Vec<Vec<f64>> = (0..15).map(|i| vec![i as f64 * 0.2]).collect();
+        let targets: Vec<f64> = inputs.iter().map(|x| x[0] * 2.0 + 1.0).collect();
+        let (population, tasks, config) = make_fitness_fixture();
+        let engine = SymRegEngine::new(config);
+        let indices: Vec<usize> = (0..tasks.len()).collect();
+
+        let parallel = map_fitness(&indices, &tasks, &population, &engine, &inputs, &targets);
+
+        // Byte-for-byte the body of the `#[cfg(not(feature = "parallel"))]` twin.
+        let sequential: Vec<Option<DiscoveredFormula>> = indices
+            .iter()
+            .map(|&i| {
+                let task = &tasks[i];
+                engine.optimize_topology(
+                    &population[task.slot].tree,
+                    &inputs,
+                    &targets,
+                    task.topology_idx,
+                )
+            })
+            .collect();
+
+        assert_eq!(parallel.len(), sequential.len());
+        for (k, (p, s)) in parallel.iter().zip(sequential.iter()).enumerate() {
+            match (p, s) {
+                (Some(pf), Some(sf)) => {
+                    assert_eq!(
+                        pf.mse.to_bits(),
+                        sf.mse.to_bits(),
+                        "slot {k}: MSE bits differ ({} vs {})",
+                        pf.mse,
+                        sf.mse
+                    );
+                    let pp: Vec<u64> = pf.params.iter().map(|v| v.to_bits()).collect();
+                    let sp: Vec<u64> = sf.params.iter().map(|v| v.to_bits()).collect();
+                    assert_eq!(pp, sp, "slot {k}: parameter bits differ");
+                }
+                (None, None) => {}
+                _ => panic!("slot {k}: fit success differs between parallel and sequential"),
+            }
+        }
+    }
+
+    /// Thread-count invariance of the GA fitness map: 1, 2, 3 and 8 workers must
+    /// all yield the identical bit pattern.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn map_fitness_is_thread_count_invariant() {
+        let inputs: Vec<Vec<f64>> = (0..15).map(|i| vec![i as f64 * 0.2]).collect();
+        let targets: Vec<f64> = inputs.iter().map(|x| x[0] * 2.0 + 1.0).collect();
+        let (population, tasks, config) = make_fitness_fixture();
+        let engine = SymRegEngine::new(config);
+        let indices: Vec<usize> = (0..tasks.len()).collect();
+
+        let run_with = |threads: usize| -> Vec<Option<u64>> {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon pool should build");
+            pool.install(|| {
+                map_fitness(&indices, &tasks, &population, &engine, &inputs, &targets)
+                    .iter()
+                    .map(|f| f.as_ref().map(|f| f.mse.to_bits()))
+                    .collect()
+            })
+        };
+
+        let reference = run_with(1);
+        for threads in [2usize, 3, 8] {
+            assert_eq!(
+                run_with(threads),
+                reference,
+                "MSE bits changed with {threads} rayon threads"
+            );
+        }
     }
 }

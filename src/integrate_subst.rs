@@ -341,7 +341,7 @@ pub(crate) fn try_trig_substitution(
     expo_val: f64,
     wrt: usize,
 ) -> Option<LoweredOp> {
-    use crate::poly::Poly;
+    use crate::poly::{Poly, ratio_to_f64};
 
     // Must be +/-0.5
     let is_sqrt = (expo_val - 0.5).abs() < 1e-12;
@@ -357,11 +357,7 @@ pub(crate) fn try_trig_substitution(
     }
 
     // Extract coefficients: inner = c0 + c1*x + c2*x^2
-    let coeff_f64 = |idx: usize| -> f64 {
-        poly.coeffs
-            .get(idx)
-            .map_or(0.0, |r| (*r.numer() as f64) / (*r.denom() as f64))
-    };
+    let coeff_f64 = |idx: usize| -> f64 { poly.coeffs.get(idx).map_or(0.0, ratio_to_f64) };
     let c0 = coeff_f64(0);
     let c1 = coeff_f64(1);
     let c2 = coeff_f64(2);

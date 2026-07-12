@@ -51,6 +51,25 @@ pub enum EmlError {
     /// or quadrature over an interval containing a singularity).
     UndefinedAtPoint(f64),
 
+    /// The requested expansion center is a *branch point* of the function.
+    ///
+    /// A branch point is a singularity around which the function is not
+    /// single-valued (a logarithmic singularity such as `ln(x)` at `0`, or an
+    /// algebraic singularity such as `sqrt(x)` at `0`). No single-valued
+    /// Laurent series in integer powers of `(z − center)` exists there, so
+    /// [`crate::series_laurent::Series`] expansion returns this error rather
+    /// than a fabricated result.
+    BranchPoint,
+
+    /// The requested expansion center is an *essential singularity* of the
+    /// function.
+    ///
+    /// At an essential singularity the principal part of the Laurent series has
+    /// infinitely many non-zero terms (for example `exp(1/x)`, `sin(1/x)` and
+    /// `cos(1/x)` at `0`). No finite-order Laurent expansion exists, so
+    /// [`crate::series_laurent::Series`] expansion returns this error.
+    EssentialSingularity,
+
     /// A numeric parameter was invalid (e.g. n_samples == 0).
     InvalidParameter(&'static str),
 
@@ -118,6 +137,14 @@ impl fmt::Display for EmlError {
             Self::UndefinedAtPoint(x) => {
                 write!(f, "operation undefined at x = {x}")
             }
+            Self::BranchPoint => write!(
+                f,
+                "expansion center is a branch point (no single-valued Laurent series exists there)"
+            ),
+            Self::EssentialSingularity => write!(
+                f,
+                "expansion center is an essential singularity (no finite-order Laurent series exists there)"
+            ),
             Self::InvalidParameter(msg) => {
                 write!(f, "invalid parameter: {msg}")
             }

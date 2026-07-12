@@ -361,7 +361,7 @@ pub fn solve_for_all(
     }
 }
 
-/// Result of solving a linear system of equations.
+/// Result of solving a system of equations.
 #[derive(Debug, Clone)]
 pub enum SystemSolveResult {
     /// A unique solution was found: `vars[i] = values[i]`.
@@ -371,10 +371,43 @@ pub enum SystemSolveResult {
     /// The system is inconsistent (no solution exists).
     Inconsistent,
     /// The system contains nonlinear terms that are not handled.
+    ///
+    /// This is now an honest "cannot decide", not "is nonlinear": a *polynomial*
+    /// nonlinear system is solved via Gröbner bases and reported as
+    /// [`SystemSolveResult::NonlinearSolutions`]. This variant remains for
+    /// systems the engine genuinely cannot process — transcendental equations,
+    /// systems mentioning variables outside `vars`, overdetermined linear
+    /// systems, and polynomial systems whose Buchberger run hit a resource cap.
     Nonlinear,
+    /// A nonlinear **polynomial** system was solved: every entry is one solution,
+    /// with `solution[i]` the value of `vars[i]`.
+    ///
+    /// Only **real** solutions are listed. An empty vector therefore means "the
+    /// system has finitely many solutions, none of which are real" — which is a
+    /// different statement from [`SystemSolveResult::Inconsistent`], which means
+    /// the system has no solutions even over ℂ.
+    NonlinearSolutions(Vec<Vec<LoweredOp>>),
 }
 
-/// Solve a linear system `exprs[i] = 0` for variables `vars`.
+/// Solve a system `exprs[i] = 0` for variables `vars`.
+///
+/// Linear systems go through the exact LU path exactly as before. A system that
+/// is polynomial but *nonlinear* in `vars` is now handed to the Gröbner engine
+/// ([`crate::poly::solve_zero_dim`]) and, when it is zero-dimensional, its real
+/// solutions are returned as [`SystemSolveResult::NonlinearSolutions`] instead of
+/// the old bare `Nonlinear`.
+///
+/// # Guarding the Gröbner path
+///
+/// Exact coefficients mean `MultiPoly::from_lowered` will happily rationalize any
+/// finite `f64`, so an expression carrying a *symbolic* irrational constant would
+/// otherwise be silently replaced by a rational one and fed to an engine that
+/// advertises exactness. [`is_groebner_safe`] refuses those: see its
+/// documentation for the exact line drawn.
+///
+/// # Errors
+///
+/// Propagates errors from the underlying linear solver.
 pub fn solve_linear_system(
     exprs: &[LoweredOp],
     vars: &[usize],
@@ -388,24 +421,30 @@ pub fn solve_linear_system(
 
     let max_var = vars.iter().max().copied().unwrap_or(0) + 1;
 
-    let mut a_mat: Vec<f64> = vec![0.0; m * n];
-    let mut b_vec: Vec<f64> = vec![0.0; m];
-
-    for (i, expr) in exprs.iter().enumerate() {
-        let mp = match MultiPoly::from_lowered(expr, max_var) {
-            Ok(p) => p,
+    // Parse every equation into an exact multivariate polynomial. A failure here
+    // means the expression is not polynomial at all (a transcendental function,
+    // a non-constant divisor, a fractional power, …).
+    let mut polys: Vec<MultiPoly> = Vec::with_capacity(m);
+    for expr in exprs {
+        match MultiPoly::from_lowered(expr, max_var) {
+            Ok(p) => polys.push(p),
             Err(_) => return Ok(SystemSolveResult::Nonlinear),
-        };
+        }
+    }
 
-        for (exp_vec, coeff) in &mp.terms {
-            let coeff_f64 = *coeff.numer() as f64 / *coeff.denom() as f64;
+    // Classify: linear in `vars`, nonlinear in `vars`, or out of scope.
+    let mut is_nonlinear = false;
+    for mp in &polys {
+        for exp_vec in mp.terms.keys() {
             let total_deg: u32 = vars
                 .iter()
                 .map(|&v| if v < exp_vec.len() { exp_vec[v] } else { 0 })
                 .sum();
             if total_deg > 1 {
-                return Ok(SystemSolveResult::Nonlinear);
+                is_nonlinear = true;
             }
+            // A variable outside `vars` makes this a parametric problem, which
+            // neither the LU path nor the Gröbner path is being asked to solve.
             let has_other_vars = exp_vec
                 .iter()
                 .enumerate()
@@ -413,6 +452,23 @@ pub fn solve_linear_system(
             if has_other_vars {
                 return Ok(SystemSolveResult::Nonlinear);
             }
+        }
+    }
+
+    if is_nonlinear {
+        return Ok(solve_nonlinear_system(exprs, &polys, vars));
+    }
+
+    let mut a_mat: Vec<f64> = vec![0.0; m * n];
+    let mut b_vec: Vec<f64> = vec![0.0; m];
+
+    for (i, mp) in polys.iter().enumerate() {
+        for (exp_vec, coeff) in &mp.terms {
+            let coeff_f64 = crate::poly::ratio_to_f64(coeff);
+            let total_deg: u32 = vars
+                .iter()
+                .map(|&v| if v < exp_vec.len() { exp_vec[v] } else { 0 })
+                .sum();
             if total_deg == 1 {
                 for (j, &v) in vars.iter().enumerate() {
                     let e = if v < exp_vec.len() { exp_vec[v] } else { 0 };
@@ -467,6 +523,159 @@ pub fn solve_linear_system(
         }
         Err(e) => Err(e),
     }
+}
+
+// ── N3: nonlinear polynomial systems via Gröbner bases ────────────────────────
+
+/// Maximum bit-length allowed for the numerator or denominator of a rationalized
+/// coefficient on the Gröbner path.
+///
+/// Every finite `f64` *is* a rational, so `f64_to_ratio` never fails; but a value
+/// that only round-trips through a 300-bit fraction is float noise rather than a
+/// coefficient anybody wrote, and feeding it to Buchberger invites a coefficient
+/// blow-up for no benefit. Legitimate inputs (`1/3`, `0.1`, `2.5`, `10^15`) sit
+/// far below this bound.
+const MAX_GROEBNER_COEFF_BITS: u64 = 256;
+
+/// Largest integer exponent accepted on the Gröbner path.
+///
+/// Buchberger is doubly exponential in the number of variables; admitting a
+/// degree-90 generator (which `MultiPoly::from_lowered` would accept) is asking
+/// for a run that cannot finish.
+const MAX_GROEBNER_POW: f64 = 16.0;
+
+/// Decide whether `expr` may be handed to the exact Gröbner engine.
+///
+/// This is the guard that keeps transcendental input out of an engine that claims
+/// exactness over ℚ. The line it draws:
+///
+/// * **[`LoweredOp::NamedConst`] is rejected.** π, e and √2 are *irrational*, and
+///   the IR says so explicitly. `f64_to_ratio` would nonetheless hand back the
+///   rational that the `f64` approximation denotes, and Buchberger would then
+///   compute a perfectly exact Gröbner basis — of the wrong ideal, while claiming
+///   exactness. Refusing is the only honest answer.
+/// * **Transcendental function nodes are rejected** (`Sin`, `Exp`, `Ln`, `Erf`, …),
+///   as are `Div` by a non-constant and non-integer powers. These are not
+///   polynomial operations at all.
+/// * **A bare [`LoweredOp::Const`] is accepted** (subject to
+///   [`MAX_GROEBNER_COEFF_BITS`]). This is not an inconsistency: a `Const` carries
+///   no symbolic identity, and the rational it denotes is its exact value, not an
+///   approximation of something else. Solving with it is exact and correct.
+///
+/// Note that `simplify()` constant-folds a `NamedConst` into a `Const` in most
+/// contexts, so an expression that reached here through the parser will usually
+/// have already lost the symbolic marker — at which point it *is* just an `f64`
+/// coefficient and is handled as such. The guard bites on IR built directly.
+#[must_use]
+pub fn is_groebner_safe(expr: &LoweredOp) -> bool {
+    match expr {
+        LoweredOp::Var(_) => true,
+        LoweredOp::Const(c) => {
+            if !c.is_finite() {
+                return false;
+            }
+            match crate::poly::f64_to_ratio(*c) {
+                Ok(r) => {
+                    r.numer().bits() <= MAX_GROEBNER_COEFF_BITS
+                        && r.denom().bits() <= MAX_GROEBNER_COEFF_BITS
+                }
+                Err(_) => false,
+            }
+        }
+        // Symbolically irrational: must not be silently rationalized.
+        LoweredOp::NamedConst(_) => false,
+        LoweredOp::Add(a, b) | LoweredOp::Sub(a, b) | LoweredOp::Mul(a, b) => {
+            is_groebner_safe(a) && is_groebner_safe(b)
+        }
+        LoweredOp::Neg(a) => is_groebner_safe(a),
+        LoweredOp::Pow(base, exp) => match exp.as_ref() {
+            LoweredOp::Const(e) => {
+                *e >= 0.0 && e.fract() == 0.0 && *e <= MAX_GROEBNER_POW && is_groebner_safe(base)
+            }
+            _ => false,
+        },
+        // Everything else (transcendentals, Div, …) is not polynomial.
+        _ => false,
+    }
+}
+
+/// Solve a nonlinear polynomial system via a lex Gröbner basis.
+///
+/// `polys` are the already-parsed equations over the ambient variable space;
+/// `vars` selects (and orders) the unknowns. The ambient polynomials are
+/// re-indexed onto the compact space `0 … vars.len()−1` so that the lex order
+/// `x₀ > … > x_{n−1}` eliminates `vars` in the order the caller gave them.
+///
+/// Any failure — an unsafe expression, a duplicate variable, or a Buchberger cap
+/// being hit — degrades to [`SystemSolveResult::Nonlinear`], i.e. an honest "not
+/// handled". A wrong or partial answer is never produced.
+fn solve_nonlinear_system(
+    exprs: &[LoweredOp],
+    polys: &[MultiPoly],
+    vars: &[usize],
+) -> SystemSolveResult {
+    if !exprs.iter().all(is_groebner_safe) {
+        return SystemSolveResult::Nonlinear;
+    }
+
+    // Duplicate unknowns would make the compaction ambiguous.
+    let mut seen = vars.to_vec();
+    seen.sort_unstable();
+    seen.dedup();
+    if seen.len() != vars.len() {
+        return SystemSolveResult::Nonlinear;
+    }
+
+    let n = vars.len();
+    let mut compact: Vec<MultiPoly> = Vec::with_capacity(polys.len());
+    for p in polys {
+        match compact_to_vars(p, vars) {
+            Some(c) => compact.push(c),
+            None => return SystemSolveResult::Nonlinear,
+        }
+    }
+
+    match crate::poly::solve_zero_dim(&compact, n, &crate::poly::GroebnerOpts::default()) {
+        Ok(crate::poly::ZeroDimOutcome::Solutions(sols)) => {
+            SystemSolveResult::NonlinearSolutions(sols)
+        }
+        // The unit ideal: no solutions anywhere, not even complex ones.
+        Ok(crate::poly::ZeroDimOutcome::NoSolutions) => SystemSolveResult::Inconsistent,
+        // Infinitely many solutions.
+        Ok(crate::poly::ZeroDimOutcome::PositiveDimensional) => SystemSolveResult::Underdetermined,
+        // A resource cap was hit, or the generators were malformed. We did not
+        // compute a Gröbner basis, so we do not pretend to have an answer.
+        Err(_) => SystemSolveResult::Nonlinear,
+    }
+}
+
+/// Re-index an ambient polynomial onto the compact variable space `vars`.
+///
+/// Returns `None` if the polynomial mentions a variable outside `vars` (the
+/// caller has already rejected that case, so this is a defensive check).
+fn compact_to_vars(p: &MultiPoly, vars: &[usize]) -> Option<MultiPoly> {
+    let n = vars.len();
+    let mut out = MultiPoly::zero(n);
+    for (exps, coeff) in &p.terms {
+        if crate::poly::coeff_is_zero(coeff) {
+            continue;
+        }
+        if exps
+            .iter()
+            .enumerate()
+            .any(|(vi, &e)| e > 0 && !vars.contains(&vi))
+        {
+            return None;
+        }
+        // `vars` is duplicate-free, so distinct ambient exponent vectors map to
+        // distinct compact ones and no term can be silently overwritten.
+        let key: Vec<u32> = vars
+            .iter()
+            .map(|&v| exps.get(v).copied().unwrap_or(0))
+            .collect();
+        out.terms.insert(key, coeff.clone());
+    }
+    Some(out)
 }
 
 #[cfg(test)]

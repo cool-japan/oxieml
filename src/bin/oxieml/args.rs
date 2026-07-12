@@ -54,6 +54,38 @@ pub(super) fn parse_var_assignments(args: &[String]) -> Vec<f64> {
     result
 }
 
+/// Parse `xN=value` tokens out of clap's trailing-var-arg positionals.
+///
+/// clap subcommands collect trailing `x0=1.5`-style tokens into a plain
+/// `Vec<String>` with no leading program-name placeholder. This wraps that
+/// slice with a dummy element 0 so [`parse_var_assignments`] (written against
+/// raw `std::env::args()`, which always has the binary path at index 0) can be
+/// reused verbatim for both the legacy shim and the new clap subcommands.
+pub(super) fn vars_from_extra(extra: &[String]) -> Vec<f64> {
+    let mut synthetic = Vec::with_capacity(extra.len() + 1);
+    synthetic.push(String::new());
+    synthetic.extend_from_slice(extra);
+    parse_var_assignments(&synthetic)
+}
+
+/// Pad a variable-binding vector with trailing zeros so it has at least
+/// `needed` elements.
+///
+/// [`oxieml::LoweredOp::eval`] indexes `vars[i]` directly with no bounds
+/// check, and several `LoweredOp` combinators (`integrate_definite`,
+/// `solve_numeric`) only pad relative to a single `wrt`/`var` index, not the
+/// full variable count of an arbitrary expression. Subcommands that build an
+/// `EvalCtx` from user-supplied `xN=value` bindings call this first so a
+/// sparsely-bound multi-variable expression cannot panic the binary.
+pub(super) fn pad_vars(vars: &[f64], needed: usize) -> Vec<f64> {
+    if vars.len() >= needed {
+        return vars.to_vec();
+    }
+    let mut padded = vars.to_vec();
+    padded.resize(needed, 0.0);
+    padded
+}
+
 pub(super) fn count_variables(tree: &EmlTree) -> usize {
     let mut max_var: Option<usize> = None;
     for node in tree.iter_postorder() {

@@ -28,10 +28,17 @@ impl LoweredOp {
     /// Returns [`IntegrateResult::Closed`] with a valid antiderivative, or
     /// [`IntegrateResult::Unsupported`] when no rule applies.
     pub fn integrate(&self, wrt: usize) -> IntegrateResult {
-        match raw_integrate(self, wrt, 0) {
-            Some(t) => IntegrateResult::Closed(t.simplify()),
-            None => IntegrateResult::Unsupported,
+        if let Some(t) = raw_integrate(self, wrt, 0) {
+            return IntegrateResult::Closed(t.simplify());
         }
+        // Final fallback: the Weierstrass `t = tan(x/2)` substitution for a
+        // rational function of `sin`/`cos` of one common affine argument. It is
+        // self-verifying and structurally declines non-affine trig arguments,
+        // so `∫ sin(x²)` / `∫ exp(x²)` remain Unsupported.
+        if let Some(t) = crate::integrate_trig::try_weierstrass(self, wrt) {
+            return IntegrateResult::Closed(t.simplify());
+        }
+        IntegrateResult::Unsupported
     }
 
     /// Compute the definite integral ∫_a^b self d(x_wrt).
@@ -106,8 +113,10 @@ fn depends_on(op: &LoweredOp, wrt: usize) -> bool {
 /// Detect whether `arg` is an affine function `a·x + b` (x = Var(wrt), a ≠ 0)
 /// that depends only on `wrt`.
 ///
-/// Returns `Some((a, b))` when successful.
-fn affine_arg(arg: &LoweredOp, wrt: usize) -> Option<(f64, f64)> {
+/// Returns `Some((a, b))` when successful. Shared with
+/// [`crate::integrate_trig`], which reduces `∫ tⁿ(a·x+b) dx` to the
+/// argument-variable antiderivative scaled by `1/a`.
+pub(crate) fn affine_arg(arg: &LoweredOp, wrt: usize) -> Option<(f64, f64)> {
     if !depends_on(arg, wrt) {
         return None;
     }
@@ -273,7 +282,12 @@ fn raw_integrate(op: &LoweredOp, wrt: usize, depth: u32) -> Option<LoweredOp> {
                     arc(raw_integrate(a, wrt, depth)?),
                 ))
             } else {
-                by_parts(a, b, wrt, depth)
+                // Both factors depend on x. Try the trig-specific product rules
+                // (sinᵐcosⁿ, product-to-sum) and the eᵃˣ·{sin,cos} solve-for-I
+                // family before falling back to generic integration by parts.
+                crate::integrate_trig::try_trig_product(a, b, wrt)
+                    .or_else(|| crate::integrate_trig::try_solve_for_i(a, b, wrt))
+                    .or_else(|| by_parts(a, b, wrt, depth))
             }
         }
 
@@ -418,6 +432,12 @@ fn raw_integrate(op: &LoweredOp, wrt: usize, depth: u32) -> Option<LoweredOp> {
                         return Some(result);
                     }
                 }
+            }
+
+            // Case E: Powers of a single trig function — sinⁿ/cosⁿ/tanⁿ and their
+            // reciprocals secⁿ/cscⁿ/cotⁿ (negative exponents) — via reduction.
+            if let Some(result) = crate::integrate_trig::try_trig_power(op, wrt) {
+                return Some(result);
             }
 
             None
@@ -637,251 +657,51 @@ fn raw_integrate(op: &LoweredOp, wrt: usize, depth: u32) -> Option<LoweredOp> {
 
 // ── Rational function integration ────────────────────────────────────────────
 
-mod integrate_rational {
+pub(crate) mod integrate_rational {
     use crate::lower::LoweredOp;
-    use crate::poly::Poly;
-    use num_rational::Ratio;
+    use crate::poly::{Poly, ratio_to_f64};
+    use crate::rewrite::apart::{PfTerm, partial_fractions};
     use std::sync::Arc;
 
     /// Attempt to integrate `num / den` with respect to variable `wrt` using
     /// partial-fraction decomposition.
     ///
-    /// Returns `None` when the integrand is not a rational function over `wrt`
-    /// or when the decomposition algorithm cannot handle it (e.g. irreducible
-    /// factors of degree >= 3).
+    /// The decomposition itself is delegated to the shared
+    /// [`partial_fractions`](crate::rewrite::apart::partial_fractions) helper
+    /// (upgraded to the full [`Poly::factor`](crate::poly::Poly::factor)); this
+    /// function only integrates the resulting summands with the elementary
+    /// table
+    ///
+    /// * polynomial part → power rule,
+    /// * `A/(x−r)^j` → `A·ln|x−r|` (`j = 1`) or `A/(1−j)·(x−r)^{1−j}` (`j > 1`),
+    /// * `(Bx+C)/q(x)` for an irreducible quadratic `q` → `ln` + `arctan`.
+    ///
+    /// Returns `None` when a summand falls outside that table (an irreducible
+    /// factor of degree ≥ 3, or a repeated irreducible quadratic), or when the
+    /// integrand is not a rational function over `wrt`.
     pub(crate) fn integrate_rational(
         num: &LoweredOp,
         den: &LoweredOp,
         wrt: usize,
     ) -> Option<LoweredOp> {
-        // ── Step 1: Convert to Poly ───────────────────────────────────────────
         let num_poly = Poly::from_lowered(num, wrt).ok()?;
         let den_poly = Poly::from_lowered(den, wrt).ok()?;
         if den_poly.is_zero() {
             return None;
         }
 
-        // ── Step 2: Polynomial long division when deg(num) >= deg(den) ───────
-        let (rem_poly, poly_anti) = if num_poly.degree() >= den_poly.degree()
-            && num_poly.degree().is_some()
-            && den_poly.degree().is_some()
-        {
-            let (quotient, rem) = num_poly.div_rem(&den_poly).ok()?;
-            let anti = poly_antiderivative(&quotient, wrt);
-            (rem, anti)
-        } else {
-            (num_poly, None)
-        };
+        let decomposition = partial_fractions(&num_poly, &den_poly, wrt)?;
 
-        // ── Step 3: If remainder is zero, return polynomial antiderivative ────
-        if rem_poly.is_zero() {
-            return Some(poly_anti.unwrap_or(LoweredOp::Const(0.0)));
-        }
-
-        // ── Step 4: Factor the denominator ───────────────────────────────────
-        let rational_roots = den_poly.rational_roots().ok()?;
-
-        // For each distinct rational root, compute multiplicity in den_poly.
-        let mut linear_factors: Vec<(f64, usize, Poly)> = Vec::new();
-        let mut remaining_den = den_poly.clone();
-
-        for r in &rational_roots {
-            let r_f64 = (*r.numer() as f64) / (*r.denom() as f64);
-            // Build linear factor (x - r): coeffs [-r, 1]
-            let neg_r = Ratio::new(-(*r.numer()), *r.denom());
-            let linear_factor = Poly {
-                coeffs: vec![neg_r, Ratio::new(1i64, 1i64)],
-            };
-
-            // Count multiplicity in remaining_den.
-            let mut mult = 0usize;
-            let mut cur = remaining_den.clone();
-            for _ in 0..10 {
-                match cur.div_rem(&linear_factor) {
-                    Ok((q, ref rem)) if rem.is_zero() => {
-                        mult += 1;
-                        cur = q;
-                    }
-                    _ => break,
-                }
-            }
-            if mult > 0 {
-                if mult > 4 {
-                    return None;
-                }
-                remaining_den = cur;
-                linear_factors.push((r_f64, mult, linear_factor));
-            }
-        }
-
-        // Inspect remaining_den degree.
-        let irred_quad: Option<[f64; 3]> = match remaining_den.degree() {
-            None | Some(0) => None, // constant, all factored
-            Some(2) => {
-                // Check discriminant.
-                let c0 = coeff_f64(&remaining_den, 0);
-                let c1 = coeff_f64(&remaining_den, 1);
-                let c2 = coeff_f64(&remaining_den, 2);
-                let disc = c1 * c1 - 4.0 * c2 * c0;
-                if disc >= 0.0 {
-                    return None; // real roots we didn't handle
-                }
-                Some([c0, c1, c2]) // irreducible quadratic
-            }
-            _ => return None, // degree 1 or >2 remaining: unsupported
-        };
-
-        // ── Step 5 & 6: Build and solve partial-fraction linear system ────────
-        let n_linear_unknowns: usize = linear_factors.iter().map(|(_, m, _)| m).sum();
-        let n_quad_unknowns: usize = if irred_quad.is_some() { 2 } else { 0 };
-        let n_unknowns = n_linear_unknowns + n_quad_unknowns;
-
-        if n_unknowns == 0 {
-            return None;
-        }
-
-        // Collect root values to avoid.
-        let avoid: Vec<f64> = linear_factors.iter().map(|(r, _, _)| *r).collect();
-        let pts = choose_eval_points(n_unknowns, &avoid);
-        if pts.len() < n_unknowns {
-            return None;
-        }
-
-        let den_f64_full = |pt: f64| den_poly.eval_f64(pt);
-
-        // Build matrix A and rhs.
-        let mut mat: Vec<Vec<f64>> = Vec::with_capacity(n_unknowns);
-        let mut rhs: Vec<f64> = Vec::with_capacity(n_unknowns);
-
-        for &pt in &pts[..n_unknowns] {
-            let mut row: Vec<f64> = Vec::with_capacity(n_unknowns);
-            let den_val = den_f64_full(pt);
-
-            // Columns for linear factors.
-            for (r_f64, mult, _) in &linear_factors {
-                for j in 1..=*mult {
-                    // Basis: den(pt) / (pt - r)^j
-                    let diff = pt - r_f64;
-                    if diff.abs() < 1e-10 {
-                        return None; // eval point too close to root
-                    }
-                    let basis = den_val / diff.powi(j as i32);
-                    row.push(basis);
-                }
-            }
-
-            // Columns for irreducible quadratic (B and C for (Bx+C)/quad).
-            if let Some([c0, c1, c2]) = irred_quad {
-                let quad_val = c2 * pt * pt + c1 * pt + c0;
-                if quad_val.abs() < 1e-12 {
-                    return None;
-                }
-                row.push(den_val * pt / quad_val); // B coefficient
-                row.push(den_val / quad_val); // C coefficient
-            }
-
-            mat.push(row);
-            rhs.push(rem_poly.eval_f64(pt));
-        }
-
-        let coeffs_pfd = gaussian_eliminate(mat, rhs)?;
-
-        // ── Step 7: Integrate term by term ───────────────────────────────────
         let mut integral_terms: Vec<LoweredOp> = Vec::new();
-
-        let mut coeff_idx = 0usize;
-        for (r_f64, mult, _) in &linear_factors {
-            for j in 1..=*mult {
-                let a_coeff = coeffs_pfd[coeff_idx];
-                coeff_idx += 1;
-                if a_coeff.abs() < 1e-14 {
-                    continue;
-                }
-                let x_minus_r = LoweredOp::Sub(
-                    Arc::new(LoweredOp::Var(wrt)),
-                    Arc::new(LoweredOp::Const(*r_f64)),
-                );
-                let term = if j == 1 {
-                    // A * ln|x - r|  (sqrt(x^2) = |x|)
-                    let abs_x_minus_r = LoweredOp::Pow(
-                        Arc::new(LoweredOp::Pow(
-                            Arc::new(x_minus_r.clone()),
-                            Arc::new(LoweredOp::Const(2.0)),
-                        )),
-                        Arc::new(LoweredOp::Const(0.5)),
-                    );
-                    LoweredOp::Mul(
-                        Arc::new(LoweredOp::Const(a_coeff)),
-                        Arc::new(LoweredOp::Ln(Arc::new(abs_x_minus_r))),
-                    )
-                } else {
-                    // A / (1 - j) * (x - r)^(1 - j)
-                    let exp_val = 1.0 - j as f64;
-                    LoweredOp::Mul(
-                        Arc::new(LoweredOp::Const(a_coeff / exp_val)),
-                        Arc::new(LoweredOp::Pow(
-                            Arc::new(x_minus_r),
-                            Arc::new(LoweredOp::Const(exp_val)),
-                        )),
-                    )
-                };
-                integral_terms.push(term);
+        if !decomposition.polynomial_part.is_zero() {
+            if let Some(anti) = poly_antiderivative(&decomposition.polynomial_part, wrt) {
+                integral_terms.push(anti);
             }
         }
-
-        // Irreducible quadratic integral.
-        if let Some([c0, c1, c2]) = irred_quad {
-            let b_coeff = coeffs_pfd[coeff_idx];
-            let c_coeff = coeffs_pfd[coeff_idx + 1];
-            // (Bx + C) / (c2*x^2 + c1*x + c0)
-            // Complete the square: c2*(x + c1/(2c2))^2 + (c0 - c1^2/(4c2))
-            let p_val = -c1 / (2.0 * c2);
-            let q_sq = c0 / c2 - (c1 / (2.0 * c2)).powi(2);
-            if q_sq <= 0.0 {
-                return None;
-            }
-            let q_val = q_sq.sqrt();
-
-            // integral = B/(2c2) * ln((x-p)^2 + q^2) + (C - Bp)/(c2*q) * arctan((x-p)/q)
-            let x_minus_p = LoweredOp::Sub(
-                Arc::new(LoweredOp::Var(wrt)),
-                Arc::new(LoweredOp::Const(p_val)),
-            );
-
-            let ln_arg = LoweredOp::Add(
-                Arc::new(LoweredOp::Pow(
-                    Arc::new(x_minus_p.clone()),
-                    Arc::new(LoweredOp::Const(2.0)),
-                )),
-                Arc::new(LoweredOp::Const(q_val * q_val)),
-            );
-
-            if b_coeff.abs() > 1e-14 {
-                let ln_part = LoweredOp::Mul(
-                    Arc::new(LoweredOp::Const(b_coeff / (2.0 * c2))),
-                    Arc::new(LoweredOp::Ln(Arc::new(ln_arg))),
-                );
-                integral_terms.push(ln_part);
-            }
-
-            let arctan_coeff = (c_coeff - b_coeff * p_val) / (c2 * q_val);
-            if arctan_coeff.abs() > 1e-14 {
-                let arctan_arg =
-                    LoweredOp::Div(Arc::new(x_minus_p), Arc::new(LoweredOp::Const(q_val)));
-                let arctan_part = LoweredOp::Mul(
-                    Arc::new(LoweredOp::Const(arctan_coeff)),
-                    Arc::new(LoweredOp::Arctan(Arc::new(arctan_arg))),
-                );
-                integral_terms.push(arctan_part);
-            }
+        for term in &decomposition.terms {
+            integral_terms.push(integrate_term(term, wrt)?);
         }
 
-        // Add polynomial antiderivative.
-        if let Some(pa) = poly_anti {
-            integral_terms.push(pa);
-        }
-
-        // ── Step 8: Fold into sum ─────────────────────────────────────────────
         if integral_terms.is_empty() {
             return Some(LoweredOp::Const(0.0));
         }
@@ -890,16 +710,127 @@ mod integrate_rational {
             .reduce(|acc, t| LoweredOp::Add(Arc::new(acc), Arc::new(t)))
     }
 
-    fn coeff_f64(p: &Poly, deg: usize) -> f64 {
-        p.coeffs
-            .get(deg)
-            .map_or(0.0, |r| (*r.numer() as f64) / (*r.denom() as f64))
+    /// Integrate a single partial-fraction summand `numerator / factor^power`.
+    ///
+    /// Handles a monic linear factor (any power) and a monic irreducible
+    /// quadratic factor (power 1). Returns `None` for anything else.
+    fn integrate_term(term: &PfTerm, wrt: usize) -> Option<LoweredOp> {
+        match term.factor.degree()? {
+            1 => integrate_linear_term(term, wrt),
+            2 => integrate_quadratic_term(term, wrt),
+            _ => None,
+        }
+    }
+
+    /// ∫ A / (x − r)^j dx for a monic linear factor `x − r`.
+    fn integrate_linear_term(term: &PfTerm, wrt: usize) -> Option<LoweredOp> {
+        // A monic linear factor `x + c0` has root `r = −c0`.
+        let root = -coeff_at(&term.factor, 0);
+        let a_coeff = coeff_at(&term.numerator, 0);
+        if a_coeff.abs() < 1e-14 {
+            return Some(LoweredOp::Const(0.0));
+        }
+        let x_minus_r = LoweredOp::Sub(
+            Arc::new(LoweredOp::Var(wrt)),
+            Arc::new(LoweredOp::Const(root)),
+        );
+        let j = term.power;
+        if j == 1 {
+            // A · ln|x − r|, written as A · ln(√((x − r)²)).
+            let abs_x_minus_r = LoweredOp::Pow(
+                Arc::new(LoweredOp::Pow(
+                    Arc::new(x_minus_r),
+                    Arc::new(LoweredOp::Const(2.0)),
+                )),
+                Arc::new(LoweredOp::Const(0.5)),
+            );
+            Some(LoweredOp::Mul(
+                Arc::new(LoweredOp::Const(a_coeff)),
+                Arc::new(LoweredOp::Ln(Arc::new(abs_x_minus_r))),
+            ))
+        } else {
+            // A / (1 − j) · (x − r)^(1 − j).
+            let exp_val = 1.0 - j as f64;
+            Some(LoweredOp::Mul(
+                Arc::new(LoweredOp::Const(a_coeff / exp_val)),
+                Arc::new(LoweredOp::Pow(
+                    Arc::new(x_minus_r),
+                    Arc::new(LoweredOp::Const(exp_val)),
+                )),
+            ))
+        }
+    }
+
+    /// ∫ (B x + C) / (x² + c₁ x + c₀) dx for a monic irreducible quadratic.
+    ///
+    /// Completing the square `x² + c₁x + c₀ = (x − p)² + q²` with `p = −c₁/2`,
+    /// `q² = c₀ − (c₁/2)²`, and writing `Bx + C = B(x − p) + (C + Bp)`, gives
+    ///
+    /// ```text
+    /// ∫ = (B/2)·ln((x − p)² + q²) + ((C + B p)/q)·arctan((x − p)/q).
+    /// ```
+    fn integrate_quadratic_term(term: &PfTerm, wrt: usize) -> Option<LoweredOp> {
+        if term.power != 1 {
+            return None; // A repeated irreducible quadratic is not in this table.
+        }
+        let c0 = coeff_at(&term.factor, 0);
+        let c1 = coeff_at(&term.factor, 1);
+        let b_coeff = coeff_at(&term.numerator, 1);
+        let c_coeff = coeff_at(&term.numerator, 0);
+
+        let p_val = -c1 / 2.0;
+        let q_sq = c0 - (c1 / 2.0).powi(2);
+        if q_sq <= 0.0 {
+            return None; // Not irreducible over ℝ; handled by the linear path.
+        }
+        let q_val = q_sq.sqrt();
+
+        let x_minus_p = LoweredOp::Sub(
+            Arc::new(LoweredOp::Var(wrt)),
+            Arc::new(LoweredOp::Const(p_val)),
+        );
+
+        let mut parts: Vec<LoweredOp> = Vec::new();
+        if b_coeff.abs() > 1e-14 {
+            let ln_arg = LoweredOp::Add(
+                Arc::new(LoweredOp::Pow(
+                    Arc::new(x_minus_p.clone()),
+                    Arc::new(LoweredOp::Const(2.0)),
+                )),
+                Arc::new(LoweredOp::Const(q_val * q_val)),
+            );
+            parts.push(LoweredOp::Mul(
+                Arc::new(LoweredOp::Const(b_coeff / 2.0)),
+                Arc::new(LoweredOp::Ln(Arc::new(ln_arg))),
+            ));
+        }
+
+        let arctan_coeff = (c_coeff + b_coeff * p_val) / q_val;
+        if arctan_coeff.abs() > 1e-14 {
+            let arctan_arg = LoweredOp::Div(Arc::new(x_minus_p), Arc::new(LoweredOp::Const(q_val)));
+            parts.push(LoweredOp::Mul(
+                Arc::new(LoweredOp::Const(arctan_coeff)),
+                Arc::new(LoweredOp::Arctan(Arc::new(arctan_arg))),
+            ));
+        }
+
+        if parts.is_empty() {
+            return Some(LoweredOp::Const(0.0));
+        }
+        parts
+            .into_iter()
+            .reduce(|acc, t| LoweredOp::Add(Arc::new(acc), Arc::new(t)))
+    }
+
+    /// Read the coefficient of `x^deg` from `p` as an `f64` (missing → 0).
+    fn coeff_at(p: &Poly, deg: usize) -> f64 {
+        p.coeffs.get(deg).map_or(0.0, ratio_to_f64)
     }
 
     fn poly_antiderivative(p: &Poly, wrt: usize) -> Option<LoweredOp> {
         let mut terms: Vec<LoweredOp> = Vec::new();
         for (i, coeff) in p.coeffs.iter().enumerate() {
-            let a_f64 = (*coeff.numer() as f64) / (*coeff.denom() as f64);
+            let a_f64 = ratio_to_f64(coeff);
             if a_f64.abs() < 1e-15 {
                 continue;
             }
@@ -915,61 +846,6 @@ mod integrate_rational {
         terms
             .into_iter()
             .reduce(|acc, t| LoweredOp::Add(Arc::new(acc), Arc::new(t)))
-    }
-
-    fn gaussian_eliminate(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
-        let n = b.len();
-        for col in 0..n {
-            let pivot_row = (col..n).max_by(|&i, &j| {
-                a[i][col]
-                    .abs()
-                    .partial_cmp(&a[j][col].abs())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })?;
-            a.swap(col, pivot_row);
-            b.swap(col, pivot_row);
-            let pivot = a[col][col];
-            if pivot.abs() < 1e-12 {
-                return None;
-            }
-            for row in (col + 1)..n {
-                let factor = a[row][col] / pivot;
-                let col_vals: Vec<f64> = a[col][col..n].to_vec();
-                for (a_rk, a_ck) in a[row][col..n].iter_mut().zip(col_vals) {
-                    *a_rk -= factor * a_ck;
-                }
-                b[row] -= factor * b[col];
-            }
-        }
-        let mut x = vec![0.0f64; n];
-        for i in (0..n).rev() {
-            let mut sum = b[i];
-            for j in (i + 1)..n {
-                sum -= a[i][j] * x[j];
-            }
-            x[i] = sum / a[i][i];
-            if !x[i].is_finite() {
-                return None;
-            }
-        }
-        Some(x)
-    }
-
-    fn choose_eval_points(n: usize, avoid: &[f64]) -> Vec<f64> {
-        let mut pts = Vec::new();
-        let candidates = [
-            0.0f64, 1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 0.5, -0.5, 1.5, -1.5, 4.0, -4.0, 5.0, -5.0,
-            0.25, 2.5, -2.5, 7.0, -7.0,
-        ];
-        for &c in &candidates {
-            if pts.len() >= n {
-                break;
-            }
-            if avoid.iter().all(|&a| (c - a).abs() > 0.1) {
-                pts.push(c);
-            }
-        }
-        pts
     }
 
     #[cfg(test)]
@@ -1054,6 +930,26 @@ mod integrate_rational {
             assert!(result.is_some(), "x/(x2+1) should integrate");
             let anti = result.unwrap();
             check_antideriv_at(&anti, |xv| xv / (xv * xv + 1.0), &[0.5, 1.0, 2.0, -1.0]);
+        }
+
+        // Exercises the arctan-coefficient path with p ≠ 0 AND B ≠ 0 — the
+        // combination that the earlier hand-rolled formula got wrong (it used
+        // `C − Bp` where the completed-square derivation requires `C + Bp`).
+        // The dormant sign error is now fixed; this locks it in.
+        #[test]
+        fn test_integral_x_over_irreducible_quadratic_shifted() {
+            let two_x = LoweredOp::Mul(Arc::new(c(2.0)), Arc::new(x()));
+            // x / (x^2 + 2x + 2)
+            let num = x();
+            let den = add(add(pow(x(), c(2.0)), two_x), c(2.0));
+            let result = integrate_rational(&num, &den, 0);
+            assert!(result.is_some(), "x/(x^2+2x+2) should integrate");
+            let anti = result.unwrap();
+            check_antideriv_at(
+                &anti,
+                |xv| xv / (xv * xv + 2.0 * xv + 2.0),
+                &[0.5, 1.0, 2.0, -0.5, 3.0],
+            );
         }
     }
 }

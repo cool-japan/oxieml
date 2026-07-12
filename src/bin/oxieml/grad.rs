@@ -1,13 +1,11 @@
 use oxieml::parser::parse;
 
-pub(super) fn run_grad(expr: &str, wrt: usize, vars: &[f64]) {
-    let tree = match parse(expr) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Parse error: {e}");
-            std::process::exit(1);
-        }
-    };
+pub(super) fn run_grad(
+    expr: &str,
+    wrt: usize,
+    vars: &[f64],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tree = parse(expr).map_err(|e| format!("parse error: {e}"))?;
     let lowered = tree.lower().simplify();
     let grad = lowered.grad(wrt);
     println!("Expression:    {lowered}");
@@ -26,4 +24,6 @@ pub(super) fn run_grad(expr: &str, wrt: usize, vars: &[f64]) {
         }
         println!("]:   {result}");
     }
+
+    Ok(())
 }

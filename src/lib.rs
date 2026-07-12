@@ -46,6 +46,7 @@ pub mod eval;
 pub mod grad;
 pub mod integrate;
 pub(crate) mod integrate_subst;
+pub mod integrate_trig;
 pub mod limit;
 pub mod linalg;
 pub mod lower;
@@ -54,6 +55,7 @@ pub mod lower_grad;
 pub mod lower_interval;
 pub mod lower_simplify;
 pub mod lower_units;
+pub mod matrix;
 pub mod named_const;
 pub mod numeric;
 pub mod numeric_verified;
@@ -61,7 +63,9 @@ pub mod ode;
 pub mod parser;
 pub mod poly;
 pub mod quadrature_nd;
+pub mod rewrite;
 pub mod series;
+pub mod series_laurent;
 #[cfg(feature = "simd")]
 pub mod simd_eval;
 pub(crate) mod simd_vec_math;
@@ -71,6 +75,7 @@ pub mod smt;
 pub mod solve;
 pub mod solve_poly;
 pub mod special;
+pub mod summation;
 pub mod symreg;
 pub mod system;
 #[cfg(feature = "tensorlogic")]
@@ -98,17 +103,26 @@ pub use integrate::IntegrateResult;
 pub use limit::{LimitPoint, LimitResult};
 pub use lower::LoweredOp;
 pub use lower_interval::IntervalLO;
+pub use matrix::{
+    Assumption, Certainty, Certified, CharPoly, Eigenpair, Matrix, MatrixError, Rref, VerifyReport,
+    ZeroOracle, ZeroVerdict,
+};
 pub use named_const::NamedConst;
 pub use numeric::{QuadOpts, RootOpts};
 pub use numeric::{lambert_w0, lambert_wm1};
 pub use numeric_verified::{RootCertificate, RootStatus, VerifiedQuadOpts};
 pub use ode::{OdeForm, OdeKind, OdeSolution, dsolve};
 pub use parser::{ParseError, parse};
-pub use poly::{Factorization, MultiPoly, Poly, PolyError};
+pub use poly::{
+    Coeff, Factorization, GroebnerError, GroebnerOpts, GroebnerStats, MonOrder, Monomial,
+    MultiPoly, Poly, PolyError, ZeroDimOutcome, groebner_basis, ideal_member, solve_zero_dim,
+};
 pub use quadrature_nd::{QuadNdMethod, QuadNdOpts, quadrature_nd};
+pub use series_laurent::Series;
 pub use solve::SolveResult;
 pub use solve::{SystemSolveResult, solve_for_all, solve_linear_system};
 pub use solve_poly::RootsResult;
+pub use summation::{SumResult, sum_definite, sum_indefinite};
 pub use symreg::SymRegLoss;
 pub use symreg::{
     DiscoveredFormula, LmConfig, MultiOutputStrategy, OptimizerKind, PdeConfig, PdeResult,
@@ -118,14 +132,17 @@ pub use symreg::{
 pub use symreg::{
     LibraryTerm, SindyConfig, SindyEquation, SindyMode, SindyResult, discover_ode_sindy,
 };
+pub use symreg::{Nsga2Config, RankedFormula};
 pub use system::{SystemOpts, solve_system_newton};
 pub use tree::{EmlNode, EmlTree};
 pub use units::{UnitError, Units};
 
 #[cfg(feature = "smt")]
 pub use smt::{
-    EmlConstraint, EmlNraSolver, EmlSmtSolver, EmlSolution, Interval, IntervalDomain, PropResult,
-    SmtResult,
+    DEFAULT_RECYCLE_AFTER, EmlConstraint, EmlNraSolver, EmlSmtSolver, EmlSolution,
+    IncrementalEmlSolver, Interval, IntervalDomain, MaxSmtOptimality, MaxSmtOutcome,
+    MaxSmtSolution, PropResult, SmtResult, SoftConstraint, UnsatCore, reset_thread_local_solver,
+    solver_construction_count, with_thread_local_solver,
 };
 
 #[cfg(feature = "scirs2")]

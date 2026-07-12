@@ -132,6 +132,17 @@ fn substitute(op: &LoweredOp, wrt: usize, replacement: &LoweredOp) -> LoweredOp 
     }
 }
 
+/// The evaluated ladder for one side of the point `c`.
+fn probe_vals(op: &LoweredOp, wrt: usize, c: f64, from_right: bool) -> Vec<f64> {
+    H_LADDER
+        .iter()
+        .map(|&h| {
+            let x = if from_right { c + h } else { c - h };
+            eval_at_wrt(op, wrt, x)
+        })
+        .collect()
+}
+
 /// Probe `op` from one side of the point `c`, returning:
 ///
 /// - A finite `f64` if the evaluated sequence is Cauchy-convergent.
@@ -140,14 +151,63 @@ fn substitute(op: &LoweredOp, wrt: usize, replacement: &LoweredOp) -> LoweredOp 
 /// - `f64::NAN` if the values oscillate, contain NaN, or are otherwise
 ///   non-convergent.
 fn probe_side(op: &LoweredOp, wrt: usize, c: f64, from_right: bool) -> f64 {
-    let vals: Vec<f64> = H_LADDER
-        .iter()
-        .map(|&h| {
-            let x = if from_right { c + h } else { c - h };
-            eval_at_wrt(op, wrt, x)
-        })
-        .collect();
+    let vals = probe_vals(op, wrt, c, from_right);
+    probe_side_process(&vals)
+}
 
+/// The distinct qualitative outcomes of probing one side of a point.
+///
+/// Distinguishes an *undefined* side (the function lies outside its real domain
+/// there, e.g. `ln(x)` for `x < 0`) from an *oscillating* side (finite values
+/// that never settle, e.g. `sin(1/x)`). The former lets a two-sided limit
+/// collapse to the defined side (a domain-restricted limit such as
+/// `lim_{x→0} x·ln x = 0`); the latter forces `DoesNotExist`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SideOutcome {
+    Finite(f64),
+    PosInf,
+    NegInf,
+    /// Finite but non-convergent (oscillation).
+    Oscillate,
+    /// Outside the real domain on this side (every probe was non-finite).
+    Undefined,
+}
+
+/// Classify one side of the point, distinguishing domain-undefined from
+/// oscillation.
+fn probe_side_classified(op: &LoweredOp, wrt: usize, c: f64, from_right: bool) -> SideOutcome {
+    let vals = probe_vals(op, wrt, c, from_right);
+    // Every probe non-finite ⇒ the function is outside its real domain here.
+    if vals.iter().all(|v| !v.is_finite()) {
+        return SideOutcome::Undefined;
+    }
+    let r = probe_side_process(&vals);
+    if r.is_nan() {
+        SideOutcome::Oscillate
+    } else if r.is_infinite() {
+        if r > 0.0 {
+            SideOutcome::PosInf
+        } else {
+            SideOutcome::NegInf
+        }
+    } else {
+        SideOutcome::Finite(r)
+    }
+}
+
+/// Reduce a single classified side to a limit result (for domain-restricted
+/// one-sided limits).
+fn classify_single(side: SideOutcome) -> LimitResult {
+    match side {
+        SideOutcome::Finite(v) => LimitResult::Finite(v),
+        SideOutcome::PosInf => LimitResult::PosInf,
+        SideOutcome::NegInf => LimitResult::NegInf,
+        SideOutcome::Oscillate | SideOutcome::Undefined => LimitResult::DoesNotExist,
+    }
+}
+
+/// Process an already-evaluated ladder into a probe value (see [`probe_side`]).
+fn probe_side_process(vals: &[f64]) -> f64 {
     let last = match vals.last() {
         Some(&v) => v,
         None => return f64::NAN,
@@ -210,6 +270,33 @@ fn probe_side(op: &LoweredOp, wrt: usize, c: f64, from_right: bool) -> f64 {
     f64::NAN
 }
 
+/// Classify a two-sided limit from the qualitative outcomes of both sides,
+/// honouring domain restrictions: a side that is entirely outside the real
+/// domain does not veto a limit that is well-defined on the other side.
+fn classify_two_sided(right: SideOutcome, left: SideOutcome) -> LimitResult {
+    use SideOutcome::{Finite, NegInf, Oscillate, PosInf, Undefined};
+    match (right, left) {
+        // Both outside the domain: the point is not approachable on the reals.
+        (Undefined, Undefined) => LimitResult::DoesNotExist,
+        // One side outside the domain ⇒ domain-restricted one-sided limit.
+        (Undefined, other) | (other, Undefined) => classify_single(other),
+        // Any oscillating (defined) side ⇒ no limit.
+        (Oscillate, _) | (_, Oscillate) => LimitResult::DoesNotExist,
+        (PosInf, PosInf) => LimitResult::PosInf,
+        (NegInf, NegInf) => LimitResult::NegInf,
+        (Finite(r), Finite(l)) => {
+            let scale = r.abs().max(l.abs()).max(1.0);
+            if (r - l).abs() <= CAUCHY_TOL * CAUCHY_FACTOR * scale {
+                LimitResult::Finite((r + l) / 2.0)
+            } else {
+                LimitResult::DoesNotExist
+            }
+        }
+        // Mixed +∞ / −∞ or finite-vs-infinite: no two-sided limit.
+        _ => LimitResult::DoesNotExist,
+    }
+}
+
 /// Classify a limit result from left and right one-sided probes.
 fn classify_probes(right: f64, left: f64) -> LimitResult {
     // Any NaN means oscillation on that side
@@ -251,6 +338,20 @@ fn classify_probes(right: f64, left: f64) -> LimitResult {
 /// 2. L'Hôpital — applied when a `0/0` or `∞/∞` `Div` form is detected.
 /// 3. Numeric probing of both sides as fallback.
 fn limit_at_finite(op: &LoweredOp, wrt: usize, c: f64, lhopital_count: usize) -> LimitResult {
+    // Domain-restricted limit: if the function is entirely outside its real
+    // domain on one side, reduce to the one-sided limit on the defined side
+    // (e.g. lim_{x→0} x·ln x = 0, ln undefined for x < 0). Only fires when a
+    // whole side is non-finite; ordinary two-sided limits fall through.
+    let right_kind = probe_side_classified(op, wrt, c, true);
+    let left_kind = probe_side_classified(op, wrt, c, false);
+    match (right_kind, left_kind) {
+        (SideOutcome::Undefined, SideOutcome::Undefined) => {}
+        (SideOutcome::Undefined, other) | (other, SideOutcome::Undefined) => {
+            return classify_single(other);
+        }
+        _ => {}
+    }
+
     let v = eval_at_wrt(op, wrt, c);
 
     // -----------------------------------------------------------------------
@@ -450,20 +551,226 @@ fn limit_inner(
 }
 
 // ---------------------------------------------------------------------------
+// Higher-level strategies: series expansion and indeterminate-form normalisation
+// ---------------------------------------------------------------------------
+
+/// Depth cap for the ordered-strategy recursion (series / normalisation).
+const MAX_STRATEGY_DEPTH: u32 = 4;
+
+/// A rough estimate of `lim op` used only to *classify* indeterminate forms
+/// (is a factor going to `0`, to `∞`, …). Never used as a final answer.
+fn approx_value(op: &LoweredOp, wrt: usize, point: LimitPoint) -> f64 {
+    match point {
+        LimitPoint::Finite(c) => {
+            let r = probe_side(op, wrt, c, true);
+            if r.is_nan() {
+                probe_side(op, wrt, c, false)
+            } else {
+                r
+            }
+        }
+        LimitPoint::PosInf => eval_at_wrt(op, wrt, 1e13),
+        LimitPoint::NegInf => eval_at_wrt(op, wrt, -1e13),
+    }
+}
+
+/// The domain-aware two-sided numeric limit at a finite point (used to
+/// cross-check the series verdict).
+fn numeric_two_sided(op: &LoweredOp, wrt: usize, c: f64) -> LimitResult {
+    let right = probe_side_classified(op, wrt, c, true);
+    let left = probe_side_classified(op, wrt, c, false);
+    classify_two_sided(right, left)
+}
+
+/// Whether two limit verdicts are consistent (same category; finite values
+/// close). Used to gate the acceptance of a symbolic/series answer against a
+/// numeric one so no fabricated value is ever returned.
+fn results_consistent(a: LimitResult, b: LimitResult) -> bool {
+    match (a, b) {
+        (LimitResult::Finite(x), LimitResult::Finite(y)) => {
+            let scale = x.abs().max(y.abs()).max(1.0);
+            (x - y).abs() <= 1e-3 * scale
+        }
+        (LimitResult::PosInf, LimitResult::PosInf)
+        | (LimitResult::NegInf, LimitResult::NegInf)
+        | (LimitResult::DoesNotExist, LimitResult::DoesNotExist)
+        | (LimitResult::Indeterminate, LimitResult::Indeterminate) => true,
+        _ => false,
+    }
+}
+
+/// Strategy A — rigorous Laurent-series limit at a finite point, accepted only
+/// when it agrees with an independent numeric probe (honesty cross-check).
+fn series_strategy(op: &LoweredOp, wrt: usize, c: f64) -> Option<LimitResult> {
+    let verdict = crate::series_laurent::limit_from_series(op, wrt, c)?;
+    let numeric = numeric_two_sided(op, wrt, c);
+    if results_consistent(verdict, numeric) {
+        Some(verdict)
+    } else {
+        None
+    }
+}
+
+/// Rewrite one indeterminate form into an equivalent expression better suited to
+/// L'Hôpital / series evaluation, given the qualitative behaviour of the parts
+/// at `point`:
+///
+/// * `∞ − ∞`  →  a single fraction via [`LoweredOp::together`] (P2), and
+/// * `0 · ∞`  →  a quotient `(→∞) / (1 / (→0))`, an `∞/∞` form.
+///
+/// Power forms (`0⁰`, `1^∞`, `∞⁰`) are handled by [`limit_power_form`], which
+/// applies `a^b = exp(b · ln a)`. Returns `None` when `op` is not a recognised
+/// indeterminate form at `point`.
+fn normalize_indeterminate(op: &LoweredOp, wrt: usize, point: LimitPoint) -> Option<LoweredOp> {
+    match op {
+        LoweredOp::Sub(a, b) => {
+            let av = approx_value(a, wrt, point);
+            let bv = approx_value(b, wrt, point);
+            if av.abs() > BIG && bv.abs() > BIG && av.signum() == bv.signum() {
+                let combined = op.together();
+                if &combined != op {
+                    return Some(combined);
+                }
+            }
+            None
+        }
+        LoweredOp::Mul(a, b) => {
+            let av = approx_value(a, wrt, point);
+            let bv = approx_value(b, wrt, point);
+            let a_zero = av.abs() < INDET_EPS;
+            let b_zero = bv.abs() < INDET_EPS;
+            let a_inf = av.abs() > BIG;
+            let b_inf = bv.abs() > BIG;
+            if a_zero && b_inf {
+                // b / (1/a)  =  ∞ / ∞
+                let recip_a = LoweredOp::Div(Arc::new(LoweredOp::Const(1.0)), a.clone());
+                return Some(LoweredOp::Div(b.clone(), Arc::new(recip_a)));
+            }
+            if b_zero && a_inf {
+                let recip_b = LoweredOp::Div(Arc::new(LoweredOp::Const(1.0)), b.clone());
+                return Some(LoweredOp::Div(a.clone(), Arc::new(recip_b)));
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Resolve an indeterminate power `base^exp` (forms `0⁰`, `1^∞`, `∞⁰`) via
+/// `a^b = exp(b · ln a)`, so `lim a^b = exp(lim b·ln a)`. Requires `base > 0`
+/// near the point (real logarithm). Accepted only when it agrees with the
+/// numeric limit of `base^exp`.
+fn limit_power_form(
+    op: &LoweredOp,
+    base: &Arc<LoweredOp>,
+    exp: &Arc<LoweredOp>,
+    wrt: usize,
+    point: LimitPoint,
+    depth: u32,
+) -> Option<LimitResult> {
+    let base_v = approx_value(base, wrt, point);
+    let exp_v = approx_value(exp, wrt, point);
+    // Real logarithm requires a positive base near the point.
+    if base_v.is_nan() || base_v <= 0.0 {
+        return None;
+    }
+    // Only engage for genuinely indeterminate forms: base → {0⁺, 1, ∞} and
+    // exp → {0, ∞}.
+    let base_indet = base_v.abs() < INDET_EPS || (base_v - 1.0).abs() < INDET_EPS || base_v > BIG;
+    let exp_indet = exp_v.abs() < INDET_EPS || exp_v.abs() > BIG;
+    if !(base_indet && exp_indet) {
+        return None;
+    }
+
+    // g = exp · ln(base)
+    let g = LoweredOp::Mul(exp.clone(), Arc::new(LoweredOp::Ln(base.clone()))).simplify();
+    let inner = limit_top(&g, wrt, point, depth + 1);
+    let verdict = match inner {
+        LimitResult::Finite(l) => {
+            let v = l.exp();
+            if v.is_finite() {
+                LimitResult::Finite(v)
+            } else {
+                LimitResult::PosInf
+            }
+        }
+        LimitResult::NegInf => LimitResult::Finite(0.0),
+        LimitResult::PosInf => LimitResult::PosInf,
+        _ => return None,
+    };
+
+    let reference = limit_inner(op, wrt, point, 0);
+    if results_consistent(verdict, reference) {
+        Some(verdict)
+    } else {
+        None
+    }
+}
+
+/// Strategy B — normalise a recognised indeterminate form, evaluate the
+/// normalised expression, and accept the result only when it agrees with the
+/// established numeric engine on the *original* expression.
+fn normalization_strategy(
+    op: &LoweredOp,
+    wrt: usize,
+    point: LimitPoint,
+    depth: u32,
+) -> Option<LimitResult> {
+    if let LoweredOp::Pow(base, exp) = op {
+        if let Some(r) = limit_power_form(op, base, exp, wrt, point, depth) {
+            return Some(r);
+        }
+    }
+    if let Some(norm) = normalize_indeterminate(op, wrt, point) {
+        let candidate = limit_top(&norm, wrt, point, depth + 1);
+        let reference = limit_inner(op, wrt, point, 0);
+        if results_consistent(candidate, reference) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Ordered strategy dispatch: series (finite points) → indeterminate-form
+/// normalisation → the L'Hôpital + numeric-probing engine.
+fn limit_top(op: &LoweredOp, wrt: usize, point: LimitPoint, depth: u32) -> LimitResult {
+    if depth < MAX_STRATEGY_DEPTH {
+        if let LimitPoint::Finite(c) = point {
+            if let Some(r) = series_strategy(op, wrt, c) {
+                return r;
+            }
+        }
+        if let Some(r) = normalization_strategy(op, wrt, point, depth) {
+            return r;
+        }
+    }
+    limit_inner(op, wrt, point, 0)
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 impl LoweredOp {
     /// Compute `lim_{x_{wrt} → point} self`.
     ///
-    /// Uses numeric probing as the primary oracle, with L'Hôpital's rule
-    /// applied symbolically when a `0/0` or `∞/∞` indeterminate `Div` form is
-    /// detected.  Results for oscillatory functions or limits that cannot be
-    /// resolved within the iteration cap are accurately reported as
-    /// [`LimitResult::DoesNotExist`] or [`LimitResult::Indeterminate`] rather
-    /// than silently wrong.
+    /// Resolves the limit with an ordered cascade of strategies, each guarded by
+    /// a numeric cross-check so a value is never fabricated:
+    ///
+    /// 1. **Laurent series** at finite points — rigorous for rational,
+    ///    removable, and pole limits (see [`crate::series_laurent`]).
+    /// 2. **Indeterminate-form normalisation** — rewrites `0·∞`, `∞−∞` and the
+    ///    power forms `0⁰`, `1^∞`, `∞⁰` into shapes amenable to L'Hôpital.
+    /// 3. **L'Hôpital + numeric probing** — the general fallback.
+    ///
+    /// Oscillatory functions, one-sided disagreements, and limits that no
+    /// strategy can settle are reported as [`LimitResult::DoesNotExist`] or
+    /// [`LimitResult::Indeterminate`] rather than as silently wrong values.
+    /// A side that lies entirely outside the real domain (e.g. `ln(x)` for
+    /// `x < 0`) does not veto a limit that is well-defined on the other side,
+    /// so domain-restricted limits such as `lim_{x→0} x·ln x = 0` are found.
     pub fn limit(&self, wrt: usize, point: LimitPoint) -> LimitResult {
-        limit_inner(&self.simplify(), wrt, point, 0)
+        limit_top(&self.simplify(), wrt, point, 0)
     }
 }
 
@@ -640,5 +947,63 @@ mod tests {
             "limit computation took too long: {elapsed:?}"
         );
         assert_eq!(result, LimitResult::DoesNotExist);
+    }
+
+    // ------------------------------------------------------------------
+    // P5 indeterminate-form spec bullets
+    // ------------------------------------------------------------------
+
+    fn ln(a: LoweredOp) -> LoweredOp {
+        LoweredOp::Ln(Arc::new(a))
+    }
+    fn mul(a: LoweredOp, b: LoweredOp) -> LoweredOp {
+        LoweredOp::Mul(Arc::new(a), Arc::new(b))
+    }
+
+    // Spec: lim_{x→0} x·ln x = 0  (the 0·∞ form; ln is defined only for x > 0,
+    // so this is a domain-restricted limit from the right).
+    #[test]
+    fn test_x_ln_x_zero() {
+        let expr = mul(var(), ln(var()));
+        assert_finite(expr.limit(0, LimitPoint::Finite(0.0)), 0.0, 1e-3);
+    }
+
+    // Spec: lim_{x→+∞} (1 + 1/x)^x = e  (the 1^∞ form).
+    #[test]
+    fn test_one_plus_inv_x_pow_x_equals_e() {
+        let expr = pow(add(c(1.0), div(c(1.0), var())), var());
+        assert_finite(expr.limit(0, LimitPoint::PosInf), std::f64::consts::E, 0.05);
+    }
+
+    // Spec: lim_{x→0} sin(1/x) = DoesNotExist  (oscillation — must NOT be
+    // fabricated as a value).
+    #[test]
+    fn test_sin_inv_x_does_not_exist() {
+        let expr = sin(div(c(1.0), var()));
+        assert_eq!(
+            expr.limit(0, LimitPoint::Finite(0.0)),
+            LimitResult::DoesNotExist
+        );
+    }
+
+    // ∞ − ∞: lim_{x→0} (1/x − 1/sin x) = 0  (resolved by the Laurent-series
+    // strategy: 1/x − 1/sin x = −x/6 + O(x³)).
+    #[test]
+    fn test_inf_minus_inf_zero() {
+        let expr = sub(div(c(1.0), var()), div(c(1.0), sin(var())));
+        assert_finite(expr.limit(0, LimitPoint::Finite(0.0)), 0.0, 1e-3);
+    }
+
+    // 0⁰: lim_{x→0⁺} x^x = 1.
+    #[test]
+    fn test_x_pow_x_one() {
+        let expr = pow(var(), var());
+        // x^x is defined only for x > 0; the domain-restricted limit is 1.
+        match expr.limit(0, LimitPoint::Finite(0.0)) {
+            LimitResult::Finite(v) => {
+                assert!((v - 1.0).abs() < 1e-2, "x^x → 1, got {v}");
+            }
+            other => panic!("x^x at 0⁺: expected Finite(≈1), got {other:?}"),
+        }
     }
 }

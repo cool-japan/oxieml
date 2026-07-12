@@ -6,8 +6,8 @@ use crate::numeric::lambert_w0;
 use crate::poly::{Poly, PolyError};
 
 use crate::numeric::lambert_wm1;
+use crate::poly::ratio_to_f64;
 use num_complex::Complex;
-use num_rational::Ratio;
 
 /// All real roots of an equation.
 #[derive(Debug, Clone)]
@@ -32,10 +32,6 @@ impl ComplexRoots {
             .map(|c| c.re)
             .collect()
     }
-}
-
-fn ratio_to_f64(r: &Ratio<i64>) -> f64 {
-    *r.numer() as f64 / *r.denom() as f64
 }
 
 /// Solve a univariate polynomial for all real roots.
@@ -95,9 +91,7 @@ pub(crate) fn solve_polynomial(poly: &Poly, _var: usize) -> Result<RootsResult, 
             let a3 = ratio_to_f64(&poly.coeffs[3]);
 
             if a3.abs() < 1e-14 {
-                let deg2 = Poly {
-                    coeffs: poly.coeffs[..3].to_vec(),
-                };
+                let deg2 = Poly::from_ratios(poly.coeffs[..3].to_vec());
                 return solve_polynomial(&deg2, _var);
             }
 
@@ -389,9 +383,7 @@ pub fn solve_polynomial_complex(poly: &Poly) -> Result<ComplexRoots, EmlError> {
             let a1 = ratio_to_f64(&poly.coeffs[1]);
             let a2 = ratio_to_f64(&poly.coeffs[2]);
             if a2.abs() < 1e-14 {
-                let p1 = Poly {
-                    coeffs: poly.coeffs[..2].to_vec(),
-                };
+                let p1 = Poly::from_ratios(poly.coeffs[..2].to_vec());
                 return solve_polynomial_complex(&p1);
             }
             let disc = a1 * a1 - 4.0 * a2 * a0;
@@ -422,12 +414,9 @@ pub fn solve_polynomial_complex(poly: &Poly) -> Result<ComplexRoots, EmlError> {
 #[cfg(test)]
 mod complex_root_tests {
     use super::*;
-    use num_rational::Ratio;
 
     fn make_poly(int_coeffs: &[i64]) -> Poly {
-        Poly {
-            coeffs: int_coeffs.iter().map(|&n| Ratio::new(n, 1)).collect(),
-        }
+        Poly::from_int_coeffs(int_coeffs)
     }
 
     #[test]

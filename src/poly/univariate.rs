@@ -1,38 +1,46 @@
-//! Dense univariate polynomial over exact rational coefficients.
+//! Dense univariate polynomial over exact, arbitrary-precision rational coefficients.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use num_rational::Ratio;
+use num_bigint::{BigInt, BigUint, Sign};
+use num_integer::Integer;
 
 use crate::lower::LoweredOp;
 
 use super::{
-    PolyError, checked_add, checked_mul, checked_neg, checked_sub, eval_poly_i64_at_ratio,
-    f64_to_ratio, gcd_i64, integer_factors, ratio_to_f64,
+    Coeff, PolyError, check_candidate_budget, coeff_is_zero, coeff_one, coeff_recip, coeff_zero,
+    f64_to_ratio, integer_divisors, positive_integer_divisors, ratio_to_f64,
 };
 
-/// Dense univariate polynomial over exact rational `Ratio<i64>` coefficients.
+/// Dense univariate polynomial over exact rational [`Coeff`] coefficients.
 ///
-/// Coefficient vector is stored in ascending degree order: `coeffs[i]` is the
+/// Coefficients are stored in ascending degree order: `coeffs[i]` is the
 /// coefficient of `x^i`. The zero polynomial is represented by an empty vector
 /// or a vector of all-zero rationals.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Because [`Coeff`] is arbitrary precision, none of the operations on this type
+/// can overflow; the only failure modes are division by the zero polynomial and
+/// the integer-factorization budget used by [`Poly::rational_roots`].
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Poly {
     /// Coefficients in ascending degree order (`coeffs[i]` = coeff of `x^i`).
-    pub coeffs: Vec<Ratio<i64>>,
+    pub coeffs: Vec<Coeff>,
 }
 
 impl Poly {
     // ── Constructors ──────────────────────────────────────────────────────────
 
     /// Create the zero polynomial.
+    #[must_use]
     pub fn zero() -> Self {
         Self { coeffs: Vec::new() }
     }
 
     /// Create the constant polynomial with value `c`.
-    pub fn constant(c: Ratio<i64>) -> Self {
-        if c == Ratio::new(0, 1) {
+    #[must_use]
+    pub fn constant(c: Coeff) -> Self {
+        if coeff_is_zero(&c) {
             Self::zero()
         } else {
             Self { coeffs: vec![c] }
@@ -40,47 +48,78 @@ impl Poly {
     }
 
     /// Create the monic monomial `x^degree`.
+    #[must_use]
     pub fn monomial(degree: usize) -> Self {
-        let mut coeffs = vec![Ratio::new(0, 1); degree + 1];
-        coeffs[degree] = Ratio::new(1, 1);
+        let mut coeffs = vec![coeff_zero(); degree + 1];
+        coeffs[degree] = coeff_one();
+        let mut p = Self { coeffs };
+        p.normalize();
+        p
+    }
+
+    /// Build a polynomial from machine-integer coefficients in ascending degree
+    /// order.
+    ///
+    /// ```
+    /// use oxieml::Poly;
+    /// // 1 + 2x + 3x²
+    /// let p = Poly::from_int_coeffs(&[1, 2, 3]);
+    /// assert_eq!(p.degree(), Some(2));
+    /// ```
+    #[must_use]
+    pub fn from_int_coeffs(coeffs: &[i64]) -> Self {
+        let coeffs = coeffs
+            .iter()
+            .map(|&n| Coeff::new_raw(BigInt::from(n), BigInt::from(1i32)))
+            .collect();
+        let mut p = Self { coeffs };
+        p.normalize();
+        p
+    }
+
+    /// Build a polynomial from exact rational coefficients in ascending degree
+    /// order.
+    #[must_use]
+    pub fn from_ratios(coeffs: Vec<Coeff>) -> Self {
         let mut p = Self { coeffs };
         p.normalize();
         p
     }
 
     /// Return the degree of this polynomial (`None` for the zero polynomial).
+    #[must_use]
     pub fn degree(&self) -> Option<usize> {
-        let norm = self.normalized();
-        if norm.coeffs.is_empty() {
-            None
-        } else {
-            Some(norm.coeffs.len() - 1)
+        let mut last = self.coeffs.len();
+        while last > 0 && coeff_is_zero(&self.coeffs[last - 1]) {
+            last -= 1;
         }
+        if last == 0 { None } else { Some(last - 1) }
     }
 
     /// Return `true` if this is the zero polynomial.
+    #[must_use]
     pub fn is_zero(&self) -> bool {
-        self.coeffs.iter().all(|c| c == &Ratio::new(0, 1))
+        self.coeffs.iter().all(coeff_is_zero)
     }
 
     /// Return the leading coefficient, or 0 for the zero polynomial.
-    pub fn leading_coeff(&self) -> Ratio<i64> {
-        let norm = self.normalized();
-        norm.coeffs
-            .last()
-            .cloned()
-            .unwrap_or_else(|| Ratio::new(0, 1))
+    #[must_use]
+    pub fn leading_coeff(&self) -> Coeff {
+        match self.degree() {
+            Some(d) => self.coeffs[d].clone(),
+            None => coeff_zero(),
+        }
     }
 
     /// Remove trailing zero coefficients (high-degree zeros).
     pub fn normalize(&mut self) {
-        let zero = Ratio::new(0, 1);
-        while self.coeffs.last() == Some(&zero) {
+        while self.coeffs.last().is_some_and(coeff_is_zero) {
             self.coeffs.pop();
         }
     }
 
     /// Return a normalized clone.
+    #[must_use]
     pub fn normalized(&self) -> Self {
         let mut p = self.clone();
         p.normalize();
@@ -91,53 +130,36 @@ impl Poly {
 
     /// Try to convert a `LoweredOp` expression tree to a univariate polynomial
     /// in variable `wrt`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolyError::NotPolynomial`] when the expression contains a
+    /// transcendental node, a different variable, a non-finite constant, or a
+    /// power that is not a small non-negative integer.
     pub fn from_lowered(expr: &LoweredOp, wrt: usize) -> Result<Self, PolyError> {
         match expr {
-            LoweredOp::Const(c) => {
-                let r = f64_to_ratio(*c)?;
-                Ok(Self::constant(r))
-            }
-            LoweredOp::NamedConst(nc) => {
-                let r = f64_to_ratio(nc.value())?;
-                Ok(Self::constant(r))
-            }
+            LoweredOp::Const(c) => Ok(Self::constant(f64_to_ratio(*c)?)),
+            LoweredOp::NamedConst(nc) => Ok(Self::constant(f64_to_ratio(nc.value())?)),
             LoweredOp::Var(i) => {
                 if *i == wrt {
                     Ok(Self {
-                        coeffs: vec![Ratio::new(0, 1), Ratio::new(1, 1)],
+                        coeffs: vec![coeff_zero(), coeff_one()],
                     })
                 } else {
                     Err(PolyError::NotPolynomial)
                 }
             }
-            LoweredOp::Add(a, b) => {
-                let pa = Self::from_lowered(a, wrt)?;
-                let pb = Self::from_lowered(b, wrt)?;
-                pa.add(&pb)
-            }
-            LoweredOp::Sub(a, b) => {
-                let pa = Self::from_lowered(a, wrt)?;
-                let pb = Self::from_lowered(b, wrt)?;
-                pa.sub(&pb)
-            }
-            LoweredOp::Mul(a, b) => {
-                let pa = Self::from_lowered(a, wrt)?;
-                let pb = Self::from_lowered(b, wrt)?;
-                pa.mul(&pb)
-            }
-            LoweredOp::Neg(a) => {
-                let pa = Self::from_lowered(a, wrt)?;
-                pa.neg()
-            }
+            LoweredOp::Add(a, b) => Self::from_lowered(a, wrt)?.add(&Self::from_lowered(b, wrt)?),
+            LoweredOp::Sub(a, b) => Self::from_lowered(a, wrt)?.sub(&Self::from_lowered(b, wrt)?),
+            LoweredOp::Mul(a, b) => Self::from_lowered(a, wrt)?.mul(&Self::from_lowered(b, wrt)?),
+            LoweredOp::Neg(a) => Self::from_lowered(a, wrt)?.neg(),
             LoweredOp::Pow(base, exp) => {
                 if let LoweredOp::Const(e) = exp.as_ref() {
                     let n = *e;
                     if n < 0.0 || n.fract() != 0.0 || n > 200.0 {
                         return Err(PolyError::NotPolynomial);
                     }
-                    let n_u = n as usize;
-                    let pb = Self::from_lowered(base, wrt)?;
-                    pb.pow(n_u)
+                    Self::from_lowered(base, wrt)?.pow(n as usize)
                 } else {
                     Err(PolyError::NotPolynomial)
                 }
@@ -147,7 +169,8 @@ impl Poly {
     }
 
     /// Convert this polynomial back to a `LoweredOp` expression tree using
-    /// variable index `wrt`.
+    /// variable index `wrt` (Horner form).
+    #[must_use]
     pub fn to_lowered(&self, wrt: usize) -> LoweredOp {
         let norm = self.normalized();
         if norm.coeffs.is_empty() {
@@ -171,142 +194,168 @@ impl Poly {
     // ── Arithmetic ────────────────────────────────────────────────────────────
 
     /// Add two polynomials.
+    ///
+    /// # Errors
+    ///
+    /// Infallible; the `Result` is kept for API stability.
     pub fn add(&self, other: &Self) -> Result<Self, PolyError> {
         let len = self.coeffs.len().max(other.coeffs.len());
-        let zero = Ratio::new(0i64, 1);
+        let zero = coeff_zero();
         let mut coeffs = Vec::with_capacity(len);
         for i in 0..len {
-            let a = self.coeffs.get(i).cloned().unwrap_or(zero);
-            let b = other.coeffs.get(i).cloned().unwrap_or(zero);
-            coeffs.push(checked_add(a, b)?);
+            let a = self.coeffs.get(i).unwrap_or(&zero);
+            let b = other.coeffs.get(i).unwrap_or(&zero);
+            coeffs.push(a + b);
         }
-        let mut p = Self { coeffs };
-        p.normalize();
-        Ok(p)
+        Ok(Self::from_ratios(coeffs))
     }
 
     /// Subtract `other` from `self`.
+    ///
+    /// # Errors
+    ///
+    /// Infallible; the `Result` is kept for API stability.
     pub fn sub(&self, other: &Self) -> Result<Self, PolyError> {
         let len = self.coeffs.len().max(other.coeffs.len());
-        let zero = Ratio::new(0i64, 1);
+        let zero = coeff_zero();
         let mut coeffs = Vec::with_capacity(len);
         for i in 0..len {
-            let a = self.coeffs.get(i).cloned().unwrap_or(zero);
-            let b = other.coeffs.get(i).cloned().unwrap_or(zero);
-            coeffs.push(checked_sub(a, b)?);
+            let a = self.coeffs.get(i).unwrap_or(&zero);
+            let b = other.coeffs.get(i).unwrap_or(&zero);
+            coeffs.push(a - b);
         }
-        let mut p = Self { coeffs };
-        p.normalize();
-        Ok(p)
+        Ok(Self::from_ratios(coeffs))
     }
 
-    /// Multiply two polynomials.
+    /// Multiply two polynomials (schoolbook convolution, exact).
+    ///
+    /// # Errors
+    ///
+    /// Infallible; the `Result` is kept for API stability.
     pub fn mul(&self, other: &Self) -> Result<Self, PolyError> {
-        if self.is_zero() || other.is_zero() {
+        let a = self.normalized();
+        let b = other.normalized();
+        if a.coeffs.is_empty() || b.coeffs.is_empty() {
             return Ok(Self::zero());
         }
-        let n = self.coeffs.len();
-        let m = other.coeffs.len();
-        let mut coeffs = vec![Ratio::new(0i64, 1); n + m - 1];
-        for (i, a) in self.coeffs.iter().enumerate() {
-            for (j, b) in other.coeffs.iter().enumerate() {
-                let term = checked_mul(*a, *b)?;
-                coeffs[i + j] = checked_add(coeffs[i + j], term)?;
+        let n = a.coeffs.len();
+        let m = b.coeffs.len();
+        let mut coeffs = vec![coeff_zero(); n + m - 1];
+        for (i, ca) in a.coeffs.iter().enumerate() {
+            if coeff_is_zero(ca) {
+                continue;
+            }
+            for (j, cb) in b.coeffs.iter().enumerate() {
+                if coeff_is_zero(cb) {
+                    continue;
+                }
+                coeffs[i + j] = &coeffs[i + j] + &(ca * cb);
             }
         }
-        let mut p = Self { coeffs };
-        p.normalize();
-        Ok(p)
+        Ok(Self::from_ratios(coeffs))
     }
 
     /// Scale this polynomial by a rational constant.
-    pub fn scale(&self, c: Ratio<i64>) -> Result<Self, PolyError> {
-        let mut coeffs = Vec::with_capacity(self.coeffs.len());
-        for a in &self.coeffs {
-            coeffs.push(checked_mul(*a, c)?);
+    ///
+    /// # Errors
+    ///
+    /// Infallible; the `Result` is kept for API stability.
+    pub fn scale(&self, c: &Coeff) -> Result<Self, PolyError> {
+        if coeff_is_zero(c) {
+            return Ok(Self::zero());
         }
-        let mut p = Self { coeffs };
-        p.normalize();
-        Ok(p)
+        let coeffs = self.coeffs.iter().map(|a| a * c).collect();
+        Ok(Self::from_ratios(coeffs))
     }
 
     /// Negate this polynomial.
+    ///
+    /// # Errors
+    ///
+    /// Infallible; the `Result` is kept for API stability.
     pub fn neg(&self) -> Result<Self, PolyError> {
-        let mut coeffs = Vec::with_capacity(self.coeffs.len());
-        for a in &self.coeffs {
-            coeffs.push(checked_neg(*a)?);
-        }
-        Ok(Self { coeffs })
+        Ok(Self {
+            coeffs: self.coeffs.iter().map(|a| -a).collect(),
+        })
     }
 
-    /// Raise this polynomial to a non-negative integer power.
+    /// Raise this polynomial to a non-negative integer power by binary
+    /// exponentiation.
+    ///
+    /// # Errors
+    ///
+    /// Infallible; the `Result` is kept for API stability.
     pub fn pow(&self, n: usize) -> Result<Self, PolyError> {
         if n == 0 {
-            return Ok(Self::constant(Ratio::new(1, 1)));
+            return Ok(Self::constant(coeff_one()));
         }
-        let mut result = Self::constant(Ratio::new(1, 1));
-        for _ in 0..n {
-            result = result.mul(self)?;
+        let mut result = Self::constant(coeff_one());
+        let mut base = self.normalized();
+        let mut exp = n;
+        while exp > 0 {
+            if exp & 1 == 1 {
+                result = result.mul(&base)?;
+            }
+            exp >>= 1;
+            if exp > 0 {
+                base = base.mul(&base)?;
+            }
         }
         Ok(result)
     }
 
     // ── Polynomial division ───────────────────────────────────────────────────
 
-    /// Euclidean polynomial division: returns `(quotient, remainder)`.
+    /// Euclidean polynomial division over ℚ: returns `(quotient, remainder)`
+    /// with `self == quotient · divisor + remainder` and `deg(remainder) <
+    /// deg(divisor)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolyError::DivByZero`] when `divisor` is the zero polynomial.
     pub fn div_rem(&self, divisor: &Self) -> Result<(Self, Self), PolyError> {
         let divisor = divisor.normalized();
-        if divisor.is_zero() {
-            return Err(PolyError::DivByZero);
-        }
+        let div_deg = divisor.degree().ok_or(PolyError::DivByZero)?;
+
         let self_norm = self.normalized();
         let self_deg = match self_norm.degree() {
             Some(d) => d,
             None => return Ok((Self::zero(), Self::zero())),
-        };
-        let div_deg = match divisor.degree() {
-            Some(d) => d,
-            None => return Err(PolyError::DivByZero),
         };
 
         if self_deg < div_deg {
             return Ok((Self::zero(), self_norm));
         }
 
-        let mut remainder = self_norm.coeffs.clone();
-        let divisor_lc = divisor.leading_coeff();
-        let q_len = self_deg - div_deg + 1;
-        let mut quotient_coeffs = vec![Ratio::new(0i64, 1); q_len];
+        let divisor_lc_inv = coeff_recip(&divisor.leading_coeff()).ok_or(PolyError::DivByZero)?;
+
+        let mut remainder = self_norm.coeffs;
+        let mut quotient = vec![coeff_zero(); self_deg - div_deg + 1];
 
         for i in (div_deg..=self_deg).rev() {
-            let rem_i = *remainder.get(i).unwrap_or(&Ratio::new(0, 1));
-            let q_simplified =
-                checked_mul(rem_i, Ratio::new(*divisor_lc.denom(), *divisor_lc.numer()))?;
-            let pos = i - div_deg;
-            quotient_coeffs[pos] = q_simplified;
-
-            for j in 0..=div_deg {
-                let sub_val = checked_mul(
-                    q_simplified,
-                    *divisor.coeffs.get(j).unwrap_or(&Ratio::new(0, 1)),
-                )?;
-                remainder[pos + j] = checked_sub(remainder[pos + j], sub_val)?;
+            let factor = &remainder[i] * &divisor_lc_inv;
+            if coeff_is_zero(&factor) {
+                continue;
             }
+            let pos = i - div_deg;
+            for j in 0..=div_deg {
+                remainder[pos + j] = &remainder[pos + j] - &(&factor * &divisor.coeffs[j]);
+            }
+            quotient[pos] = factor;
         }
 
-        let mut q_poly = Self {
-            coeffs: quotient_coeffs,
-        };
-        q_poly.normalize();
-        let mut r_poly = Self { coeffs: remainder };
-        r_poly.normalize();
-
-        Ok((q_poly, r_poly))
+        Ok((Self::from_ratios(quotient), Self::from_ratios(remainder)))
     }
 
     // ── GCD ───────────────────────────────────────────────────────────────────
 
-    /// Compute the monic GCD of two polynomials using the Euclidean algorithm.
+    /// Compute the monic GCD of two polynomials with the Euclidean algorithm
+    /// over ℚ.
+    ///
+    /// # Errors
+    ///
+    /// Infallible in practice: [`PolyError::DivByZero`] can only surface from an
+    /// internal division, and the loop never divides by zero.
     pub fn gcd(a: &Self, b: &Self) -> Result<Self, PolyError> {
         let mut u = a.normalized();
         let mut v = b.normalized();
@@ -315,66 +364,72 @@ impl Poly {
             let (_, r) = u.div_rem(&v)?;
             u = v;
             v = r;
-            u.normalize();
-            v.normalize();
         }
 
         if u.is_zero() {
             return Ok(Self::zero());
         }
-        let lc = u.leading_coeff();
-        u.scale(Ratio::new(*lc.denom(), *lc.numer()))
+        let inv = coeff_recip(&u.leading_coeff()).ok_or(PolyError::DivByZero)?;
+        u.scale(&inv)
     }
 
     // ── Differentiation ───────────────────────────────────────────────────────
 
     /// Compute the formal derivative of this polynomial.
+    ///
+    /// # Errors
+    ///
+    /// Infallible; the `Result` is kept for API stability.
     pub fn diff(&self) -> Result<Self, PolyError> {
         if self.coeffs.len() <= 1 {
             return Ok(Self::zero());
         }
-        let mut coeffs = Vec::with_capacity(self.coeffs.len() - 1);
-        for (i, c) in self.coeffs.iter().enumerate().skip(1) {
-            let k = i as i64;
-            let new_c = checked_mul(*c, Ratio::new(k, 1))?;
-            coeffs.push(new_c);
-        }
-        let mut p = Self { coeffs };
-        p.normalize();
-        Ok(p)
+        let coeffs = self
+            .coeffs
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, c)| c * Coeff::from_integer(BigInt::from(i)))
+            .collect();
+        Ok(Self::from_ratios(coeffs))
     }
 
     // ── Evaluation ────────────────────────────────────────────────────────────
 
-    /// Evaluate this polynomial at a rational point.
-    pub fn eval(&self, x: Ratio<i64>) -> Result<Ratio<i64>, PolyError> {
-        let mut result = Ratio::new(0i64, 1);
-        let mut x_pow = Ratio::new(1i64, 1);
-        for c in &self.coeffs {
-            let term = checked_mul(*c, x_pow)?;
-            result = checked_add(result, term)?;
-            x_pow = checked_mul(x_pow, x)?;
+    /// Evaluate this polynomial at an exact rational point (Horner).
+    ///
+    /// # Errors
+    ///
+    /// Infallible; the `Result` is kept for API stability.
+    pub fn eval(&self, x: &Coeff) -> Result<Coeff, PolyError> {
+        let mut acc = coeff_zero();
+        for c in self.coeffs.iter().rev() {
+            acc = &(&acc * x) + c;
         }
-        Ok(result)
+        Ok(acc)
     }
 
-    /// Evaluate this polynomial at an `f64` point.
+    /// Evaluate this polynomial at an `f64` point (Horner).
+    #[must_use]
     pub fn eval_f64(&self, x: f64) -> f64 {
         let norm = self.normalized();
         if norm.coeffs.is_empty() {
             return 0.0;
         }
-        let n = norm.coeffs.len();
-        let mut acc = ratio_to_f64(&norm.coeffs[n - 1]);
-        for i in (0..n - 1).rev() {
-            acc = acc * x + ratio_to_f64(&norm.coeffs[i]);
+        let mut acc = 0.0f64;
+        for c in norm.coeffs.iter().rev() {
+            acc = acc * x + ratio_to_f64(c);
         }
         acc
     }
 
     // ── Square-free part ──────────────────────────────────────────────────────
 
-    /// Return the square-free part of this polynomial using Yun's algorithm.
+    /// Return the (monic) square-free part `f / gcd(f, f')` of this polynomial.
+    ///
+    /// # Errors
+    ///
+    /// Propagates division errors, which cannot occur for a non-zero input.
     pub fn square_free(&self) -> Result<Self, PolyError> {
         let f = self.normalized();
         if f.is_zero() {
@@ -382,264 +437,335 @@ impl Poly {
         }
         let df = f.diff()?;
         let g = Self::gcd(&f, &df)?;
-        if g.is_zero() || (g.degree() == Some(0)) {
+        if g.is_zero() || g.degree() == Some(0) {
             return Ok(f);
         }
         let (q, r) = f.div_rem(&g)?;
         if !r.is_zero() {
             return Ok(f);
         }
-        let mut result = q;
-        if !result.is_zero() {
-            let lc = result.leading_coeff();
-            result = result.scale(Ratio::new(*lc.denom(), *lc.numer()))?;
+        if q.is_zero() {
+            return Ok(q);
         }
-        Ok(result)
-    }
-
-    // ── Rational root theorem ─────────────────────────────────────────────────
-
-    /// Find all rational roots of this polynomial.
-    pub fn rational_roots(&self) -> Result<Vec<Ratio<i64>>, PolyError> {
-        let norm = self.normalized();
-        if norm.is_zero() {
-            return Ok(Vec::new());
-        }
-
-        let mut denom_lcm: i64 = 1;
-        for c in &norm.coeffs {
-            let d = *c.denom();
-            let g = gcd_i64(denom_lcm, d);
-            denom_lcm = denom_lcm
-                .checked_mul(d / g)
-                .ok_or(PolyError::CoeffOverflow)?;
-        }
-        let mut int_coeffs: Vec<i64> = Vec::with_capacity(norm.coeffs.len());
-        for c in &norm.coeffs {
-            let scaled = (*c.numer())
-                .checked_mul(denom_lcm / *c.denom())
-                .ok_or(PolyError::CoeffOverflow)?;
-            int_coeffs.push(scaled);
-        }
-
-        let constant_term = *int_coeffs.first().unwrap_or(&0);
-        let leading = *int_coeffs.last().unwrap_or(&0);
-
-        if constant_term == 0 {
-            let mut roots = vec![Ratio::new(0, 1)];
-            let mut shifted = int_coeffs.clone();
-            while shifted.first() == Some(&0) {
-                shifted.remove(0);
-            }
-            if shifted.len() < int_coeffs.len() {
-                let p2 = Self {
-                    coeffs: shifted.iter().map(|&n| Ratio::new(n, 1)).collect(),
-                };
-                let more = p2.rational_roots()?;
-                roots.extend(more);
-            }
-            roots.sort_by(|a, b| {
-                ratio_to_f64(a)
-                    .partial_cmp(&ratio_to_f64(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            roots.dedup();
-            return Ok(roots);
-        }
-
-        let p_factors = integer_factors(constant_term);
-        let q_factors = integer_factors(leading);
-
-        let zero = Ratio::new(0i64, 1);
-        let mut roots: Vec<Ratio<i64>> = Vec::new();
-
-        for p in &p_factors {
-            for q in &q_factors {
-                if *q == 0 {
-                    continue;
-                }
-                let candidate = Ratio::new(*p, *q);
-                let val = eval_poly_i64_at_ratio(&int_coeffs, candidate)?;
-                if val == zero {
-                    roots.push(candidate);
-                }
-            }
-        }
-
-        roots.sort_by(|a, b| {
-            ratio_to_f64(a)
-                .partial_cmp(&ratio_to_f64(b))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        roots.dedup();
-        Ok(roots)
+        let inv = coeff_recip(&q.leading_coeff()).ok_or(PolyError::DivByZero)?;
+        q.scale(&inv)
     }
 
     // ── Content and primitive part ────────────────────────────────────────────
 
-    /// Compute the content (GCD of all coefficients) of this polynomial.
-    pub fn content(&self) -> Ratio<i64> {
+    /// Compute the content of this polynomial: the unique positive rational `c`
+    /// such that `self = c · pp` where `pp` is a primitive integer polynomial.
+    ///
+    /// Concretely `c = gcd_i(n_i · L / d_i) / L` where `L = lcm_i(d_i)` and
+    /// `c_i = n_i / d_i`. The zero polynomial has content `0`.
+    #[must_use]
+    pub fn content(&self) -> Coeff {
         let norm = self.normalized();
-        if norm.is_zero() {
-            return Ratio::new(0, 1);
+        if norm.coeffs.is_empty() {
+            return coeff_zero();
         }
-        let mut g_numer: i64 = 0;
-        let mut g_denom: i64 = 1;
+
+        let mut lcm_denom = BigInt::from(1i32);
         for c in &norm.coeffs {
-            let n = c.numer().abs();
-            let d = *c.denom();
-            let new_numer = gcd_i64(g_numer.abs(), n);
-            let gcd_d = gcd_i64(g_denom, d);
-            let new_denom = if gcd_d == 0 {
-                d
-            } else {
-                match (g_denom / gcd_d).checked_mul(d) {
-                    Some(v) => v,
-                    None => g_denom,
-                }
-            };
-            g_numer = new_numer;
-            g_denom = new_denom;
+            lcm_denom = lcm_denom.lcm(c.denom());
         }
-        if g_numer == 0 {
-            return Ratio::new(0, 1);
+        let mut gcd_numer = BigInt::from(0i32);
+        for c in &norm.coeffs {
+            let scaled = c.numer() * (&lcm_denom / c.denom());
+            gcd_numer = gcd_numer.gcd(&scaled);
         }
-        Ratio::new(g_numer.abs(), g_denom)
+        if gcd_numer.sign() == Sign::NoSign {
+            return coeff_zero();
+        }
+        Coeff::new(gcd_numer, lcm_denom)
     }
 
-    /// Return the primitive part of this polynomial (divide by content).
+    /// Return the primitive part of this polynomial: an integer polynomial with
+    /// coefficient GCD 1 and a positive leading coefficient.
+    ///
+    /// # Errors
+    ///
+    /// Infallible for well-formed input; the `Result` is kept for API stability.
     pub fn primitive_part(&self) -> Result<Self, PolyError> {
         let norm = self.normalized();
         if norm.is_zero() {
             return Ok(Self::zero());
         }
-        let c = norm.content();
-        if *c.numer() == 0 {
-            return Ok(norm);
-        }
-        let inv_c = Ratio::new(*c.denom(), *c.numer());
-        let mut result = norm.scale(inv_c)?;
-        if result.leading_coeff() < Ratio::new(0, 1) {
+        let content = norm.content();
+        let inv = match coeff_recip(&content) {
+            Some(inv) => inv,
+            None => return Ok(norm),
+        };
+        let mut result = norm.scale(&inv)?;
+        if result.leading_coeff() < coeff_zero() {
             result = result.neg()?;
         }
         Ok(result)
     }
 
-    /// Internal: compute resultant returning a Ratio<i64> to avoid premature CoeffOverflow.
-    fn resultant_ratio(a: &Self, b: &Self) -> Result<Ratio<i64>, PolyError> {
+    /// Clear denominators: return the integer coefficient vector of the
+    /// primitive part (ascending degree), together with nothing else.
+    ///
+    /// The result is the unique primitive integer polynomial proportional to
+    /// `self` with a positive leading coefficient. Returns an empty vector for
+    /// the zero polynomial.
+    fn integer_primitive_coeffs(&self) -> Vec<BigInt> {
+        let norm = self.normalized();
+        if norm.coeffs.is_empty() {
+            return Vec::new();
+        }
+
+        let mut lcm_denom = BigInt::from(1i32);
+        for c in &norm.coeffs {
+            lcm_denom = lcm_denom.lcm(c.denom());
+        }
+        let mut ints: Vec<BigInt> = norm
+            .coeffs
+            .iter()
+            .map(|c| c.numer() * (&lcm_denom / c.denom()))
+            .collect();
+
+        let mut g = BigInt::from(0i32);
+        for c in &ints {
+            g = g.gcd(c);
+        }
+        if g.sign() != Sign::NoSign {
+            for c in &mut ints {
+                *c /= &g;
+            }
+        }
+        if ints.last().is_some_and(|c| c.sign() == Sign::Minus) {
+            for c in &mut ints {
+                *c = -(&*c);
+            }
+        }
+        ints
+    }
+
+    // ── Rational root theorem ─────────────────────────────────────────────────
+
+    /// Find every rational root of this polynomial, exactly.
+    ///
+    /// The polynomial is first reduced to its primitive integer form
+    /// `a_n x^n + … + a_0`. Every rational root in lowest terms is then `p/q`
+    /// with `p | a_0` and `q | a_n`, so the search enumerates the exact integer
+    /// divisors of `a_0` and `a_n` (via trial division + Pollard–Brent rho +
+    /// Miller–Rabin). Candidates are pre-screened with the classical
+    /// divisibility filters `(q − p) | f(1)` and `(p + q) | f(−1)` — both follow
+    /// from `f(x) = (q x − p) · g(x)` with `g` integral (Gauss' lemma) — and the
+    /// survivors are evaluated exactly with a homogeneous Horner scheme
+    /// `Σ a_i p^i q^{n−i}`, so no rounding is involved anywhere.
+    ///
+    /// Roots are returned sorted ascending, without duplicates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolyError::FactorizationLimit`] when `|a_0|` or `|a_n|` cannot be
+    /// factored within the search budget, or when the candidate grid would be
+    /// unreasonably large.
+    pub fn rational_roots(&self) -> Result<Vec<Coeff>, PolyError> {
+        let mut int_coeffs = self.integer_primitive_coeffs();
+        if int_coeffs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut roots: BTreeSet<Coeff> = BTreeSet::new();
+
+        // Factor out x^k: a zero constant term means 0 is a root.
+        let mut shift = 0usize;
+        while shift < int_coeffs.len() && int_coeffs[shift].sign() == Sign::NoSign {
+            shift += 1;
+        }
+        if shift > 0 {
+            roots.insert(coeff_zero());
+            int_coeffs.drain(..shift);
+        }
+        if int_coeffs.len() < 2 {
+            // Constant (possibly after removing the x^k factor): no more roots.
+            return Ok(roots.into_iter().collect());
+        }
+
+        let degree = int_coeffs.len() - 1;
+        let constant_term = int_coeffs[0].clone();
+        let leading = int_coeffs[degree].clone();
+
+        let p_divisors = integer_divisors(&constant_term)?;
+        let q_divisors = positive_integer_divisors(&leading)?;
+        check_candidate_budget(p_divisors.len(), q_divisors.len())?;
+
+        // f(1) = Σ a_i and f(−1) = Σ (−1)^i a_i, used as cheap exact filters.
+        let mut f_at_one = BigInt::from(0i32);
+        let mut f_at_minus_one = BigInt::from(0i32);
+        for (i, a) in int_coeffs.iter().enumerate() {
+            f_at_one += a;
+            if i.is_multiple_of(2) {
+                f_at_minus_one += a;
+            } else {
+                f_at_minus_one -= a;
+            }
+        }
+
+        let one_unsigned = BigUint::from(1u32);
+
+        // Powers of q are needed by the homogeneous Horner evaluation.
+        for q in &q_divisors {
+            let mut q_powers: Vec<BigInt> = Vec::with_capacity(degree + 1);
+            let mut acc = BigInt::from(1i32);
+            for _ in 0..=degree {
+                q_powers.push(acc.clone());
+                acc *= q;
+            }
+
+            for p in &p_divisors {
+                if p.magnitude().gcd(q.magnitude()) != one_unsigned {
+                    // Not in lowest terms; the reduced form of this candidate is
+                    // visited elsewhere in the grid.
+                    continue;
+                }
+
+                // (q − p) | f(1)
+                let q_minus_p = q - p;
+                if f_at_one.sign() != Sign::NoSign {
+                    if q_minus_p.sign() == Sign::NoSign {
+                        continue;
+                    }
+                    if (&f_at_one % &q_minus_p).sign() != Sign::NoSign {
+                        continue;
+                    }
+                }
+                // (q + p) | f(−1)
+                let q_plus_p = q + p;
+                if f_at_minus_one.sign() != Sign::NoSign {
+                    if q_plus_p.sign() == Sign::NoSign {
+                        continue;
+                    }
+                    if (&f_at_minus_one % &q_plus_p).sign() != Sign::NoSign {
+                        continue;
+                    }
+                }
+
+                // Exact homogeneous Horner: Σ a_i p^i q^(n−i).
+                let mut acc = int_coeffs[degree].clone();
+                for i in (0..degree).rev() {
+                    acc = &acc * p + &int_coeffs[i] * &q_powers[degree - i];
+                }
+                if acc.sign() == Sign::NoSign {
+                    roots.insert(Coeff::new(p.clone(), q.clone()));
+                }
+            }
+        }
+
+        Ok(roots.into_iter().collect())
+    }
+
+    // ── Resultant and discriminant ────────────────────────────────────────────
+
+    /// Compute the resultant of two polynomials.
+    ///
+    /// Uses the Euclidean recursion
+    ///
+    /// ```text
+    /// res(a, b) = (−1)^(deg a · deg b) · lc(b)^(deg a − deg r) · res(b, r),   r = a mod b
+    /// res(c, b) = c^(deg b)          (deg c = 0)
+    /// res(a, c) = c^(deg a)          (deg c = 0)
+    /// ```
+    ///
+    /// which is exact over ℚ. Because [`Coeff`] is arbitrary precision, the
+    /// coefficient growth of the rational remainder sequence is a performance
+    /// concern only — the value returned is always exact. `res(a, b) = 0` exactly
+    /// when `a` and `b` share a non-constant factor.
+    ///
+    /// # Errors
+    ///
+    /// Propagates division errors, which cannot occur for non-zero inputs.
+    pub fn resultant(a: &Self, b: &Self) -> Result<Coeff, PolyError> {
         let a = a.normalized();
         let b = b.normalized();
 
         if a.is_zero() || b.is_zero() {
-            return Ok(Ratio::new(0, 1));
+            return Ok(coeff_zero());
         }
 
         let da = a.degree().unwrap_or(0);
         let db = b.degree().unwrap_or(0);
 
         if da == 0 {
-            let c = a.leading_coeff();
-            let mut r = Ratio::new(1i64, 1);
-            for _ in 0..db {
-                r = checked_mul(r, c)?;
-            }
-            return Ok(r);
+            return Ok(pow_coeff(&a.leading_coeff(), db));
+        }
+        if db == 0 {
+            return Ok(pow_coeff(&b.leading_coeff(), da));
         }
 
-        if db == 0 {
-            let c = b.leading_coeff();
-            let mut r = Ratio::new(1i64, 1);
-            for _ in 0..da {
-                r = checked_mul(r, c)?;
-            }
-            return Ok(r);
-        }
+        let sign = if (da * db).is_multiple_of(2) {
+            coeff_one()
+        } else {
+            -coeff_one()
+        };
 
         if da < db {
-            let sign = if (da as i64)
-                .checked_mul(db as i64)
-                .is_some_and(|x| x % 2 != 0)
-            {
-                Ratio::new(-1i64, 1)
-            } else {
-                Ratio::new(1i64, 1)
-            };
-            let sub = Self::resultant_ratio(&b, &a)?;
-            return checked_mul(sub, sign);
+            let sub = Self::resultant(&b, &a)?;
+            return Ok(&sign * &sub);
         }
 
         let (_, rem) = a.div_rem(&b)?;
-
         if rem.is_zero() {
-            return Ok(Ratio::new(0, 1));
+            return Ok(coeff_zero());
         }
 
-        let sign = if (da as i64)
-            .checked_mul(db as i64)
-            .is_none_or(|x| x % 2 == 0)
-        {
-            Ratio::new(1i64, 1)
-        } else {
-            Ratio::new(-1i64, 1)
-        };
-
-        let lc_b = b.leading_coeff();
         let dr = rem.degree().unwrap_or(0);
-        let exp = da - dr;
-        let mut lc_pow = Ratio::new(1i64, 1);
-        for _ in 0..exp {
-            lc_pow = checked_mul(lc_pow, lc_b)?;
-        }
+        let lc_pow = pow_coeff(&b.leading_coeff(), da - dr);
+        let sub = Self::resultant(&b, &rem)?;
 
-        let sub_res = Self::resultant_ratio(&b, &rem)?;
-
-        let tmp = checked_mul(sign, lc_pow)?;
-        checked_mul(tmp, sub_res)
+        Ok(&(&sign * &lc_pow) * &sub)
     }
 
-    /// Compute the resultant of two polynomials via Euclidean recursion.
-    pub fn resultant(a: &Self, b: &Self) -> Result<i64, PolyError> {
-        let r = Self::resultant_ratio(a, b)?;
-        let (n, d) = (*r.numer(), *r.denom());
-        if d != 1 {
-            return Err(PolyError::CoeffOverflow);
-        }
-        Ok(n)
-    }
-
-    /// Compute the discriminant of this polynomial.
-    pub fn discriminant(&self) -> Result<i64, PolyError> {
+    /// Compute the discriminant `(−1)^(n(n−1)/2) · res(f, f′) / lc(f)`.
+    ///
+    /// Exact and arbitrary precision. For a monic quadratic `x² + b x + c` this
+    /// is exactly `b² − 4c`, for any `b`, `c` in ℚ.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolyError::DivByZero`] for the zero polynomial's leading
+    /// coefficient (unreachable: the zero polynomial short-circuits to `0`).
+    pub fn discriminant(&self) -> Result<Coeff, PolyError> {
         let f = self.normalized();
         if f.is_zero() {
-            return Ok(0);
+            return Ok(coeff_zero());
         }
         let n = f.degree().unwrap_or(0);
         if n == 0 {
-            return Ok(1);
+            return Ok(coeff_one());
         }
 
         let df = f.diff()?;
-        let res = Self::resultant_ratio(&f, &df)?;
+        let res = Self::resultant(&f, &df)?;
 
-        let exp = (n as i64) * (n as i64 - 1) / 2;
-        let sign = if exp % 2 == 0 {
-            Ratio::new(1i64, 1)
+        let exponent = n * (n - 1) / 2;
+        let sign = if exponent.is_multiple_of(2) {
+            coeff_one()
         } else {
-            Ratio::new(-1i64, 1)
+            -coeff_one()
         };
 
-        let lc = f.leading_coeff();
-        if lc == Ratio::new(0, 1) {
-            return Err(PolyError::DivByZero);
-        }
-
-        let lc_inv = Ratio::new(*lc.denom(), *lc.numer());
-        let num = checked_mul(sign, res)?;
-        let result = checked_mul(num, lc_inv)?;
-        let (rn, rd) = (*result.numer(), *result.denom());
-        if rd != 1 {
-            return Err(PolyError::CoeffOverflow);
-        }
-        Ok(rn)
+        let lc_inv = coeff_recip(&f.leading_coeff()).ok_or(PolyError::DivByZero)?;
+        Ok(&(&sign * &res) * &lc_inv)
     }
+}
+
+/// Exact integer power of a rational coefficient.
+fn pow_coeff(base: &Coeff, exp: usize) -> Coeff {
+    let mut result = coeff_one();
+    let mut acc = base.clone();
+    let mut e = exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = &result * &acc;
+        }
+        e >>= 1;
+        if e > 0 {
+            acc = &acc * &acc;
+        }
+    }
+    result
 }

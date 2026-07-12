@@ -16,6 +16,7 @@ mod discover_shared;
 mod evolution;
 mod loss;
 mod mcts;
+pub mod nsga2;
 mod numerics;
 mod optimize_lm;
 mod pareto;
@@ -34,6 +35,11 @@ pub use topology::{dedupe_by_semantics, enumerate_topologies};
 pub use constants::snap_to_named_const;
 pub use evolution::run_evolutionary;
 pub use loss::SymRegLoss;
+pub use nsga2::{
+    NSGA2_NUM_OBJECTIVES, Nsga2Config, RankedFormula, crowded_compare, crowding_distance,
+    dominates_objectives, environmental_selection, fast_nondominated_sort, objective_vector,
+    objective_vectors, rank_and_crowding, rank_formulas, sanitize_objective,
+};
 pub use pareto::{dominates_by, pareto_front, pareto_front_ic};
 pub use pde::{
     PdeConfig, PdeField, PdeLibraryTerm, PdeMode, PdeResult, PdeShape, discover_pde,
@@ -546,6 +552,36 @@ impl SymRegEngine {
     ) -> Result<Vec<DiscoveredFormula>, crate::error::EmlError> {
         let formulas = self.discover(inputs, targets, num_vars)?;
         Ok(pareto_front(&formulas))
+    }
+
+    /// Discover formulas with a full NSGA-II multi-objective search.
+    ///
+    /// Runs the genuine NSGA-II loop — fast non-dominated sort (`O(M·N²)`),
+    /// crowding distance, crowded-comparison mating selection and elitist (μ+λ)
+    /// environmental selection — over the two minimised objectives *MSE* and
+    /// *complexity*. See [`nsga2`] for the algorithm and its edge cases.
+    ///
+    /// Unlike [`Self::discover_pareto`], which post-filters a pool produced by a
+    /// scalar-scored search, this returns the **whole final population annotated
+    /// with `(rank, crowding)`** — [`RankedFormula`] — sorted best-first by the
+    /// crowded-comparison operator. The non-dominated front is
+    /// `result.iter().filter(|r| r.rank == 0)`.
+    ///
+    /// `SymRegConfig::{max_depth, enable_const_leaf, unit_filter, optimizer, …}`
+    /// still shape the search space and the per-topology fit; `nsga2_config`
+    /// configures only the evolutionary layer. The run is reproducible: the master
+    /// seed is [`SymRegConfig::seed`], defaulting to `42`.
+    ///
+    /// Both [`Self::discover_pareto`] and the free [`pareto_front`] are unchanged
+    /// and remain available.
+    pub fn discover_nsga2(
+        &self,
+        inputs: &[Vec<f64>],
+        targets: &[f64],
+        num_vars: usize,
+        nsga2_config: &Nsga2Config,
+    ) -> Result<Vec<RankedFormula>, crate::error::EmlError> {
+        nsga2::run_nsga2(self, inputs, targets, num_vars, nsga2_config)
     }
 }
 
