@@ -814,7 +814,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** numeric det `[[1,2],[3,4]]→−2`; symbolic `[[a,b],[c,d]]→ad−bc`; Bareiss 3×3 Vandermonde; rref/nullspace; charpoly + Cayley–Hamilton probe; eigenvalues `{±i}`; singular `→Err(SingularMatrix)`; `A·inv(A)≈I`.
   - **Risk:** symbolic zero undecidable for transcendentals → 3-tier oracle + `verify()` net; expression swell → simplify each step + n≤8 cap.
 
-- [~] **P1 — Symbolic summation: Gosper + telescoping + Faulhaber** (planned 2026-06-15)
+- [x] **P1 — Symbolic summation: Gosper + telescoping + Faulhaber** (implemented 2026-07-19)
   - **Goal:** `sum_indefinite(term,k)` / `sum_definite(term,k,lo,hi)` → `SumResult` with closed forms for hypergeometric terms; honest `NotHypergeometric`/`NotClosedForm`.
   - **Design:** New `src/summation/{mod,gosper,faulhaber,ratio}.rs`. Full Gosper-Petkovšek a/b/c decomposition + degree-bounded key polynomial via `gaussian_eliminate`. Faulhaber via Bernoulli numbers. Dispatch: polynomial→Faulhaber; constant-ratio→geometric; rational-ratio→Gosper; else `NotHypergeometric`.
   - **Files:** src/summation/ (new), src/lib.rs, src/integrate.rs (relocate `gaussian_eliminate`).
@@ -830,7 +830,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** `expand((x+1)²)`, `factor(x²−1)`, `apart(1/((x²+1)(x²+4)))` succeeds (was None), apart→together round-trip, `powsimp(x²·x³)=x⁵`, `logcombine(ln2+ln3)=ln6`; 4 rational-integral tests unchanged.
   - **Risk:** `apart` refactor regression → same numeric-verify gate; expand blow-up → local cap.
 
-- [~] **P3 — Trig/exp-log simplify identities + lightweight assumptions** (planned 2026-06-15)
+- [x] **P3 — Trig/exp-log simplify identities + lightweight assumptions** (implemented 2026-07-19)
   - **Goal:** simplify gains opt-in Pythagorean (`sin²+cos²→1`, `1+tan²→1/cos²`, `cosh²−sinh²→1`), double/half-angle, product-to-sum, log/exp-combine — gated by an **Assumptions** layer. Existing simplify tests green.
   - **Design:** New `src/assumptions.rs` (`VarAssumption{positive,nonnegative,real,integer}`, `Assumptions`) + `LoweredOp::simplify_with(&Assumptions)`. `apply_identities` runs inside simplify, value-checked at `PROBE_POINTS`. Expanding rules are opt-in via `RewriteFlags`. Split trig collector into `src/lower_simplify_identities.rs`.
   - **Files:** src/assumptions.rs (new), src/rewrite/logexp.rs (shared with P2), src/lower_simplify_identities.rs (new), src/lower_simplify.rs, src/lib.rs.
@@ -838,7 +838,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** `sin²x+cos²x→1`; `cosh²−sinh²→1`; product-to-sum opt-in; `√(x²)` with `nonnegative`; regression: existing lower_simplify tests unchanged.
   - **Risk:** identities perturbing canonical form → expanding rules opt-in + value-check every commit.
 
-- [~] **P4 — Integration depth: trig powers/products + Weierstrass + by-parts solve-for-I** (planned 2026-06-15)
+- [x] **P4 — Integration depth: trig powers/products + Weierstrass + by-parts solve-for-I** (implemented 2026-07-19)
   - **Goal:** `∫sinⁿ/cosⁿ/tanⁿ/secⁿ`, `∫sinᵐcosⁿ`, `∫sin ax cos bx`, `∫R(sin,cos)` via Weierstrass `t=tan(x/2)`, and `∫eˣsin x` solve-for-I. Tests asserting `Unsupported` for these flip to `Closed`.
   - **Design:** New `src/integrate_trig.rs`. Reduction formulas (cap n≤20). Weierstrass: predicate → substitute → `partial_fractions`/`integrate_rational` (P2) → back-substitute. By-parts solve-for-I replaces cycle-hash bail (integrate.rs:213-220).
   - **Files:** src/integrate_trig.rs (new), src/integrate.rs, src/lib.rs.
@@ -846,7 +846,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests (flip Unsupported→Closed):** `∫sin²x=x/2−sin2x/4`, `∫tan²x=tan x−x`, `∫1/(2+cos x)` (Weierstrass), `∫eˣsin x=eˣ(sin x−cos x)/2`. **`∫sin(x²)`/`∫exp(x²)` MUST stay Unsupported.**
   - **Risk:** update Unsupported-asserting tests; solve-for-I sign errors caught by numeric-verify.
 
-- [~] **P5 — Laurent series + indeterminate-form L'Hôpital + series-based limits** (planned 2026-06-15)
+- [x] **P5 — Laurent series + indeterminate-form L'Hôpital + series-based limits** (implemented 2026-07-19)
   - **Goal:** `laurent(wrt,center,order)` so singular centers no longer hard-error; limit normalizes `0·∞,∞−∞,0⁰,1^∞,∞⁰`; honest `Indeterminate`/`DoesNotExist`.
   - **Design:** New `src/series_laurent.rs` (`Series{center,lo_pow:i32,coeffs}`). Pole-order detection + regular-part Taylor expansion. `normalize_indeterminate` in limit.rs. `limit_via_series` ordered L'Hôpital → series → numeric probing. Branch points → `Err(BranchPoint)`/`Err(EssentialSingularity)`.
   - **Files:** src/series_laurent.rs (new), src/series.rs, src/limit.rs, src/lib.rs (new `EmlError` variants).
@@ -886,7 +886,7 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** push/pop verdicts == N independent `check_sat`; push/pop hygiene; unsat-core minimality; MaxSMT optimum; solver-construction-count == 1 over ≥50 topologies.
   - **Risk:** OxiZ `Solver` not `Sync` → stays in sequential phase (no R1 conflict).
 
-- [~] **T1 — Full Python + WASM API coverage** (planned 2026-06-15)
+- [x] **T1 — Full Python + WASM API coverage** (implemented 2026-07-19; Python surface complete + GIL-verified 12/12, `_core` ABI preserved; WASM source complete, host-compiles, clippy-clean. **Known gap:** the `wasm32-unknown-unknown` *target* build is blocked by a pre-existing `getrandom 0.4.3` `wasm_js`-backend requirement (verified — affects `master` too), which is infrastructure entangled with the deferred `rand` decision. See "Discovered follow-ups" below.)
   - **Goal:** `oxieml._core` (ABI name preserved) exposes thin `unwrap`-free wrappers over unexposed public surface including Round-4 APIs (NSGA-II, incremental/MaxSMT, JIT batch, trigamma, summation, matrix). WASM exposes curated browser subset.
   - **Design:** `map_err`/`js_err` helpers. New `src/python/{jit,smt,verified,units,pareto,discovery,algebra}.rs` (each < 300 lines), each `add_class` cfg-gated on both `python` and its capability feature. WASM excludes JIT/SMT/PDE/SINDy (cranelift + bundle size).
   - **Files:** src/python/{jit,smt,verified,units,pareto,discovery,algebra}.rs (new), src/python/mod.rs, src/wasm/ (split mod/symreg/algebra).
@@ -902,10 +902,23 @@ No cycle. The `tensorlogic-compiler` and `tensorlogic-adapters` crates are also 
   - **Tests:** `assert_cmd`: `eval "E(1,1)"`, legacy `--lower` shim, piped REPL `echo "E(1,1)\n:quit" | oxieml repl`, `--help` exit 0.
   - **Risk:** backward-compat → legacy shim + CHANGELOG; clap `cli`-gated so lib purity intact; no new CI yaml.
 
-- [x] **T3 — Trigamma (ψ¹) derivative — close the silent grad-through-digamma gap** (planned 2026-06-15)
+- [x] **T3 — Trigamma (ψ¹) derivative — close the silent grad-through-digamma gap** (grad wiring genuinely implemented + tested 2026-07-19 — ⚠️ this was a **false pre-session checkoff**: the `trigamma` special-fn & `LoweredOp::Trigamma` IR variant existed since 0.1.2, but `d/dx digamma = trigamma(f)·f'` in `lower_grad.rs`/`autodiff.rs` still returned a silent `0`. Now real across symbolic grad + forward-mode JVP + reverse-mode VJP, with 6 finite-difference-checked tests. Tetragamma ψ² (2nd derivative through digamma) remains a documented honest boundary.)
   - **Goal:** `trigamma(x)` in special.rs (pure Rust); new `LoweredOp::Trigamma` (+ `OxiOp`) across ~22 match sites; `d/dx digamma(f)=trigamma(f)·f'` wired into lower_grad.rs:384, autodiff.rs:158/297. **CORRECTNESS fix** — run SOLO (only Round-4 core-enum change).
   - **Design:** NaN/pole guards; reflection `ψ¹(x)=π²/sin²(πx)−ψ¹(1−x)` for x<0.5; recurrence up-shift while x<6; asymptotic `1/x+1/2x²+ΣB₂ₙ/x^{2n+1}` to ~1e-12. ~22 sites each clone the adjacent `Digamma` arm. Tetragamma ψ² documented as honest gap (explicit comment, not silent 0).
   - **Files:** src/special.rs + ~22 match sites across lower/mod.rs, lower/oxiblas.rs, lower_grad.rs:384 (the fix), autodiff.rs:158+297, lower_simplify.rs, lower/display.rs, lower_interval.rs, lower_units.rs, compile.rs, jit.rs, limit.rs, integrate.rs, integrate_subst.rs, ode.rs, solve.rs, tensorlogic.rs, simd_eval.rs, symreg/constants.rs, symreg/topology.rs.
   - **Prerequisites:** none — **land solo** before R1/R3 (both also touch jit.rs/simd_eval.rs).
   - **Tests:** `trigamma(1)=π²/6≈1.6449340668`; recurrence `ψ¹(x)−ψ¹(x+1)=1/x²`; reflection identity; **the fix**: `Digamma(Var0).grad(0)` matches central-difference at x∈{1.5,2.5,3.0} (currently returns 0); JIT/SIMD parity; `lgamma''=trigamma`.
   - **Risk:** missing match arm → compile error (non-exhaustive forces completeness); tetragamma documented honestly; no `#[allow]`, no unwrap.
+
+## Discovered follow-ups (surfaced during round-4 implementation, 2026-07-19)
+
+These are *not* part of the original round-4 scope; they were found while landing it and are recorded so they are not lost. None block the host build/test/clippy gate (1170 tests green, clippy clean, 29 doctests green).
+
+- [~] **F1 — `wasm32-unknown-unknown` target build blocked by `getrandom 0.4.3`** (found 2026-07-19)
+  - **Symptom (verified):** `cargo build --target wasm32-unknown-unknown --no-default-features --features wasm` fails while compiling `getrandom v0.4.3`: *"The wasm32/64-unknown-unknown are not supported by default; you may need to enable the \"wasm_js\" crate feature."* Pre-existing — present on `master`, introduced by the dependency bumps that pulled `rand 0.10 → getrandom 0.4`. Not caused by T1's WASM code (that code host-compiles and is clippy-clean).
+  - **Entanglement:** downstream of the `rand` usage in `src/symreg/*`. The user explicitly deferred the `rand → scirs2-core` migration this session, so this is left as a flagged follow-up rather than fixed.
+  - **Candidate fix (does NOT require the rand migration):** add a target-scoped dep `[target.'cfg(target_arch = "wasm32")'.dependencies] getrandom = { version = "0.4", features = ["wasm_js"] }` **plus** a `.cargo/config.toml` with `[target.wasm32-unknown-unknown] rustflags = ['--cfg', 'getrandom_backend="wasm_js"']`. Warning: this only clears the *first* wasm32 blocker; a full `wasm32` build may surface further issues (rayon/`parallel`, etc.) and needs its own verification pass.
+  - **Also:** `wasm-bindgen-test` is not a dependency, so the WASM round-trip tests use `#[cfg(target_arch = "wasm32")] #[test]` (host-excluded) rather than `#[wasm_bindgen_test]`. Adding `wasm-bindgen-test` as a dev-dep + a wasm test runner is the proper long-term path.
+
+- [x] **F2 — Misleading parser-grammar examples in pre-existing Python doc comments** (fixed 2026-07-19 by W6: corrected `src/python/calculus.rs:14` `"x^2"`/`"sin(x)"` → valid EML `"x0"`/`"E(x0,1)"`; `src/python/solve.rs` audited and confirmed to contain no invalid examples)
+  - **Symptom:** `crate::parse` accepts only the crate's minimal grammar (`1 | x<N> | E(a,b)/eml(a,b)`), but some pre-existing doc comments in `src/python/calculus.rs` and `src/python/solve.rs` show infix examples like `"x^2"` / `"sin(x)"` that would actually fail to parse. New T1 code/tests use only valid strings; the stale examples in the older files were left untouched (out of the doctest-fix scope) and want a doc pass.

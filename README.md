@@ -103,6 +103,65 @@ University, Institute of Theoretical Physics).
     sharper constant fitting; PDE discovery (`discover_pde`); uncertainty quantification via
     bootstrap or analytic covariance; AIC/BIC information criteria for model selection.
 
+31. **Arbitrary-Precision Polynomial Algebra** — `Poly`/`MultiPoly` coefficients are exact
+    `BigRational` (`num-bigint`/`num-rational`); every algebraic operation is overflow-free
+    for arbitrary-magnitude rational input.
+
+32. **Modern Polynomial Factorization** — `Poly::factor()` performs full irreducible
+    factorization over ℚ at arbitrary degree via distinct-degree factorization,
+    Cantor–Zassenhaus equal-degree splitting, Hensel lifting, and Zassenhaus recombination.
+
+33. **Gröbner Bases & Nonlinear Systems** — `groebner_basis`/`ideal_member` (Buchberger,
+    Lex/GrLex/GrevLex order); nonlinear polynomial systems (e.g. `{x²+y²=1, x=y}`) now solve
+    to real roots via lex-Gröbner elimination instead of reporting `Nonlinear`.
+
+34. **Symbolic Linear Algebra** — `Matrix` over `LoweredOp` entries: Bareiss fraction-free
+    determinant, Faddeev–LeVerrier characteristic polynomial, rref/nullspace/eigenvalues/
+    eigenvectors/inverse, backed by a 3-tier symbolic-zero oracle (structural simplify →
+    Schwartz–Zippel probing → honest `ProbablyZero`).
+
+35. **Symbolic Summation** — `sum_indefinite`/`sum_definite` via full Gosper–Petkovšek
+    decomposition (hypergeometric terms), Faulhaber's formula (polynomial terms), and
+    geometric/telescoping shortcuts; honest `NotHypergeometric`/`NotClosedForm` otherwise.
+
+36. **Algebraic Rewriting** — `LoweredOp::{expand, factor, collect, apart, together, powsimp,
+    logcombine}`; never panics, and partial fractions are now backed by `Poly::factor`.
+
+37. **Assumption-Gated Simplification** — `Assumptions`/`VarAssumption` (positive/nonnegative/
+    real/integer) gate opt-in Pythagorean, double/half-angle, product-to-sum, and log/exp-combine
+    identities via `LoweredOp::simplify_with`.
+
+38. **Deeper Integration** — trig-power/product reduction formulas, Weierstrass `t = tan(x/2)`
+    substitution for general rational trig integrands, and by-parts solve-for-I for cyclic
+    integrals such as `∫eˣsin x`.
+
+39. **Laurent Series & Indeterminate-Form Limits** — `laurent(wrt, center, order)` expands
+    around singular points instead of hard-erroring; `limit` normalizes `0·∞`, `∞−∞`, `0⁰`,
+    `1^∞`, `∞⁰` forms with a series-based fallback.
+
+40. **NSGA-II Multi-Objective Symbolic Regression** — `SymRegEngine::discover_nsga2` returns
+    the full non-dominated front ranked by fast-nondominated-sort + crowding distance.
+
+41. **Deterministic Parallel Search** — MCTS rollouts and intra-island GA fitness evaluation
+    run on the rayon pool under `feature = "parallel"`; bit-identical to the sequential path
+    for a fixed seed.
+
+42. **JIT Batch Evaluation** — `JitFn::call_batch`/`call_batch_parallel` compile one internal
+    Cranelift loop per expression and evaluate N rows without re-entering the JIT per row.
+
+43. **Incremental & MaxSMT Solving** — `IncrementalEmlSolver` reuses one live OxiZ solver via
+    push/pop; `max_smt` (feature `smt-opt`) and `minimize_unsat_core` round out the SMT layer.
+
+44. **Expanded Python & WASM Surface** — `oxieml._core` now covers symbolic matrices,
+    summation, rewriting, NSGA-II, verified roots, units, JIT batch calls, and incremental/
+    MaxSMT SMT; the WASM build exposes a curated browser subset (parse/eval, LaTeX, rewriting,
+    summation, small symbolic matrices, definite integration, root solving, NSGA-II), excluding
+    JIT/SMT/PDE/SINDy.
+
+45. **CLI Subcommands & REPL** — clap-derived subcommands (`eval`, `lower`, `grad`, `integrate`,
+    `solve`, `simplify`, `symreg`, `smt`, `series`, `limit`, `repl`) behind the default `cli`
+    feature; the legacy single-dash flag interface keeps working unchanged via a shim.
+
 ## CLI Tool
 
 The `oxieml` CLI can evaluate EML expressions, generate EML from function names,
@@ -144,6 +203,32 @@ If the input is not a valid EML expression, the CLI auto-detects function names:
 ```bash
 oxieml pi          # same as: oxieml -g pi
 oxieml sin         # generates sin(x0) template
+```
+
+### Subcommands (v0.1.4+)
+
+`oxieml` also exposes a `clap`-derived subcommand interface (default feature `cli`) covering
+the round-4 surface. The legacy flags above keep working unchanged — dispatch is decided by
+whether the first argument is one of the subcommand keywords below (subcommands never start
+with `-`, so the two styles cannot collide):
+
+```bash
+oxieml eval "E(x0,1)" x0=2.0                        # same evaluator, subcommand form
+oxieml grad 0 "E(x0,1)"                             # symbolic d/dx0
+#=> Expression:    exp(x0)
+#=> d/dx0:         exp(x0)
+
+oxieml integrate "E(x0,1)" --wrt 0                  # indefinite integral
+oxieml integrate "E(x0,1)" --wrt 0 --from 0 --to 1  # definite integral
+oxieml solve "E(x0,1)" "E(1,1)" --var 0             # solve exp(x0) == e
+oxieml simplify "E(x0,1)"                           # tree-level simplify
+oxieml symreg --vars 1 --file data.txt              # discover a formula
+oxieml smt "E(x0,1) > 1" --lo -5 --hi 5             # SMT-check (needs `smt` feature)
+oxieml series "E(x0,1)" --wrt 0 --order 4           # Taylor series
+oxieml limit "E(x0,1)" --wrt 0 --point inf          # limit as x0 -> +inf
+#=> lim x0 -> +inf: E(x0,1) = pos_inf
+
+oxieml repl                                         # interactive REPL (std stdin)
 ```
 
 ## Quick Start (Library)
@@ -338,6 +423,37 @@ Released 2026-06-25.
   symbolic-regression pruning (`smt_prune`) is correspondingly more conservative and can no longer discard a
   satisfiable topology.
 
+## What's New in v0.1.4 (Unreleased)
+
+See `CHANGELOG.md` for full detail; highlights:
+
+- **Deeper computer algebra** — arbitrary-precision (`BigRational`) polynomial backend;
+  modern arbitrary-degree factorization (Cantor–Zassenhaus + Hensel + Zassenhaus); Gröbner
+  bases (Buchberger) with ideal membership and Gröbner-based nonlinear system solving; a new
+  symbolic `Matrix` type (Bareiss determinant, Faddeev–LeVerrier charpoly, rref/nullspace/
+  eigen/inverse); symbolic summation (Gosper + Faulhaber + telescoping); an algebraic
+  rewriting API (`expand`/`factor`/`collect`/`apart`/`together`/`powsimp`/`logcombine`);
+  assumption-gated trig/exp-log simplify identities; deeper integration (trig-power/product
+  reduction, Weierstrass `t = tan(x/2)`, by-parts solve-for-I); Laurent series with
+  indeterminate-form L'Hôpital and series-based limits
+- **Search & ML** — proper NSGA-II multi-objective symbolic regression
+  (`discover_nsga2`); deterministic parallel MCTS/GA fitness evaluation (bit-identical to
+  single-threaded under a fixed seed); JIT batch/SIMD evaluation (`call_batch`/
+  `call_batch_parallel`); incremental SMT solving (push/pop solver reuse), MaxSMT, and
+  unsat-core extraction
+- **Interfaces** — a much larger Python `_core` surface (matrix, summation, rewriting,
+  NSGA-II, verified roots, units, JIT, SMT) and a curated WASM subset; a clap-based CLI with
+  subcommands (`eval, lower, grad, integrate, solve, simplify, symreg, smt, series, limit,
+  repl`), the legacy flag interface preserved via a shim
+
+**Known gaps:** the `wasm32-unknown-unknown` *target* build is currently blocked by a
+pre-existing `getrandom 0.4.3` `wasm_js`-backend requirement (all bindings compile cleanly on
+the host); REPL raw-mode line editing is deferred behind a future opt-in `repl-rich`; `rand`
+is retained in `src/symreg/*` (not migrated to `scirs2-core` this cycle); and the tetragamma
+boundary (`d/dx trigamma(f)` via ψ²) remains intentionally unimplemented and evaluates to `0`
+by design. The first-order `d/dx digamma(f) = trigamma(f)·f′` gradient is now wired across
+symbolic grad, JVP, and VJP — see CHANGELOG `### Fixed`/`### Notes`.
+
 ## Canonical Constructions (Complete Phylogenetic Tree)
 
 All functions from the paper's phylogenetic tree (Figure 1) are implemented:
@@ -444,6 +560,7 @@ S -> 1 | eml(S,S) -------> Add/Sub/Mul/Exp/Ln...
 | `lower_simplify` | Simplification rules on `LoweredOp` (constant folding, algebraic) |
 | `lower_interval` | Interval arithmetic on `LoweredOp` for range analysis |
 | `lower_units`    | SI unit inference and dimensional consistency checking |
+| `assumptions`    | Per-variable assumptions (`Assumptions`, `VarAssumption`) gating opt-in simplify identities |
 | `named_const`    | Named constant detection (π, e, √2, rationals) post-Adam |
 | `compile`        | EML → Rust source code generation (scalar, batch, closure) |
 | `symreg`         | Symbolic regression engine (topology enum + Adam + beam + MCTS) |
@@ -451,30 +568,36 @@ S -> 1 | eml(S,S) -------> Add/Sub/Mul/Exp/Ln...
 | `symreg/mcts`    | Monte Carlo Tree Search topology exploration |
 | `symreg/numerics`| Adam optimizer, k-fold CV, noise-robust loss functions |
 | `symreg/constants`| Post-Adam constant extraction and rounding |
-| `smt`            | [feature: smt] Constraint solving (interval propagation + OxiZ LRA) |
+| `symreg/nsga2`   | NSGA-II fast-nondominated-sort + crowding-distance multi-objective search |
+| `smt`            | [feature: smt] Constraint solving (interval propagation + OxiZ LRA); incremental push/pop reuse, MaxSMT, unsat-core (`smt-opt` for RC2) |
 | `simd_eval`      | [feature: simd] SIMD batch evaluation via oxiblas-core |
-| `jit`            | [feature: jit] Cranelift JIT for OxiOp sequences |
+| `jit`            | [feature: jit] Cranelift JIT for OxiOp sequences, incl. `call_batch`/`call_batch_parallel` |
 | `tensorlogic`    | [feature: tensorlogic] Bidirectional `LoweredOp ↔ TLExpr` |
 | `scirs2`         | [feature: scirs2] ndarray adapter for SciRS2 integration |
 | `python`         | [feature: python] PyO3 bindings for Python |
 | `wasm`           | [feature: wasm] wasm-bindgen bindings for browser/Node.js |
 | `units`          | SI unit algebra with rational exponents (`Rexp`, `Units`) |
-| `solve`          | Symbolic equation solving (`solve_for`, `solve_polynomial_complex`) |
+| `solve`          | Symbolic equation solving: `solve_for`/`solve_for_all`; linear + Gröbner-based nonlinear systems (`SystemSolveResult`, `solve_linear_system`) |
 | `ode`            | Symbolic ODE solving (`dsolve`, `OdeForm`, `OdeSolution`) |
-| `special`        | Special functions (`erf`, `erfc`, `lgamma`, `digamma`, `ei`, `si`, `ci`) |
+| `special`        | Special functions (`erf`, `erfc`, `lgamma`, `digamma`, `trigamma`, `ei`, `si`, `ci`) |
 | `linalg`         | Rank-revealing LA: QR, SVD, `pinv`, `solve_least_squares` |
+| `matrix`         | Symbolic linear algebra: Bareiss determinant, Faddeev–LeVerrier charpoly, rref/nullspace/eigenvalues/eigenvectors/inverse |
 | `simd_vec_math`  | SIMD transcendentals (`simd_exp`, `simd_ln`, `simd_sin`, `simd_cos`, `simd_tanh`) |
 | `autodiff`       | JVP (dual-number forward mode), VJP (reverse sweep), `nth_derivative`, `mixed_partial` |
 | `integrate`      | Symbolic antidifferentiation, definite integration with adaptive-quadrature fallback |
 | `integrate_subst`| u-substitution, trig substitution, rational partial-fractions integration |
+| `integrate_trig` | Trig-power/product reduction, Weierstrass `t = tan(x/2)` substitution, by-parts solve-for-I |
 | `limit`          | Limit computation: L'Hôpital + numeric two-sided probing; `LimitPoint`/`LimitResult` |
 | `series`         | Taylor/Maclaurin series: `taylor(wrt, center, order)`, `maclaurin(wrt, order)` |
-| `poly`           | Exact polynomial algebra: `Poly` (univariate, `Ratio<i64>` coeffs), `MultiPoly` (sparse multivariate) |
-| `solve_poly`     | Equation solving: quadratic, Cardano cubic, Lambert-W via Halley, `solve_for_all`, `solve_system` |
+| `series_laurent` | Laurent series expansion (`laurent`) around singular points; `BranchPoint`/`EssentialSingularity` |
+| `poly`           | Exact polynomial algebra over `BigRational`: `Poly` (univariate, arbitrary-degree factorization), `MultiPoly` (sparse multivariate), Gröbner bases + ideal membership (`groebner_basis`, `ideal_member`) |
+| `rewrite`        | Algebraic rewriting: `expand`/`factor`/`collect`/`apart`/`together`/`powsimp`/`logcombine` |
+| `summation`      | Symbolic summation: Gosper–Petkovšek + Faulhaber + telescoping (`sum_indefinite`, `sum_definite`) |
+| `solve_poly`     | Quadratic/Cardano-cubic/Lambert-W root building blocks (`RootsResult`); complex roots via Durand-Kerner (`solve_polynomial_complex`) |
 | `numeric`        | Root-finding (Newton-Brent), adaptive-Simpson quadrature, `RootOpts`, `QuadOpts` |
 | `numeric_verified`| Verified interval integration + Krawczyk root-finding with `RootCertificate` |
 | `quadrature_nd`  | Tensor-product Gauss-Legendre + Monte Carlo N-D quadrature; `quadrature_nd(vars, lo, hi)` |
-| `system`         | Multivariate Newton systems: `solve_system(fs, x0, opts)` via symbolic Jacobian |
+| `system`         | Multivariate Newton systems: `solve_system_newton(fs, x0, opts)` via symbolic Jacobian |
 | `error`          | Error types |
 
 ## Features
@@ -486,7 +609,9 @@ oxieml = { version = "0.1", features = ["smt", "simd", "parallel"] }
 
 | Feature        | Description |
 |----------------|-------------|
+| `cli`          | clap-derived CLI subcommands + REPL (in `default`; gates the `oxieml` binary) |
 | `smt`          | OxiZ SMT backend + interval propagation + NRA solver |
+| `smt-opt`      | RC2-based MaxSMT on top of `smt` (`oxiz/optimization`) |
 | `simd`         | SIMD batch evaluation via oxiblas-core (aarch64 + x86_64) |
 | `parallel`     | Rayon parallel batch evaluation |
 | `tensorlogic`  | Bidirectional `LoweredOp ↔ TLExpr` bridge |
@@ -530,12 +655,13 @@ scales near-linearly on large batches (100K+ points).
   complex eval is part of the public API (`EmlTree::eval_complex`), API is also real-valued via `eval_real`
 - **Discovery vs execution separation** — EML trees for search, lowered ops for speed
 - **Parser roundtrip** — `parse(to_compact_string(tree)) == tree`
-- **Pure Rust, zero FFI** — Deps: `num-complex`, `rand`;
-  optional: `rayon` (parallel), `oxiblas-core` (simd), `oxiz` + `num-rational` (smt)
+- **Pure Rust, zero FFI** — Deps: `num-complex`, `rand`, `num-bigint`, `num-integer`,
+  `num-rational` (exact polynomial/rational arithmetic); optional: `rayon` (parallel),
+  `oxiblas-core` (simd), `oxiz` (smt), `clap` (cli)
 
 ## Test Coverage
 
-739 tests covering:
+1170 tests covering:
 - Canonical tree construction (correctness, complex, symbolic)
 - Lowering, compilation, pretty-print, LaTeX
 - Symbolic gradient, Jacobian, Hessian (central-difference cross-checks)
@@ -545,14 +671,20 @@ scales near-linearly on large batches (100K+ points).
 - Serde round-trip (JSON + oxicode binary)
 - SIMD/parallel equivalence
 - SMT/constraint solving: interval propagation, OxiZ backend, SAT/UNSAT
+- Incremental SMT push/pop equivalence, MaxSMT optimality, unsat-core minimality
 - Symbolic regression: Adam, Pareto, k-fold CV, beam, MCTS, multi-output, ODE
+- NSGA-II ranking/crowding and parallel-vs-sequential bit-identical determinism (MCTS + GA)
 - Unit-aware regression (dimensional analysis)
-- JIT compilation (scalar, vectorized, cache, hash stability)
+- JIT compilation (scalar, vectorized, cache, hash stability, batch/parallel-batch)
 - TensorLogic bridge (to/from TLExpr, rewrite rules, soft-prior export)
-- CLI integration (eval, lower, grad, symreg, format, output flags)
+- Polynomial factorization (Cantor–Zassenhaus/Hensel/Zassenhaus) and Gröbner basis / ideal-membership correctness
+- Symbolic linear algebra (Bareiss determinant, Faddeev–LeVerrier charpoly, rref/nullspace/eigen)
+- Symbolic summation (Gosper/Faulhaber/telescoping) and algebraic rewriting round-trips
+- Weierstrass/trig-power integration and Laurent-series/indeterminate-form limits
+- CLI integration (eval, lower, grad, symreg, format, output flags, subcommands)
 
 ```bash
-cargo nextest run --all-features    # 739 tests
+cargo nextest run --all-features    # 1170 tests
 cargo clippy --all-targets --all-features -- -D warnings   # zero warnings
 cargo bench --features simd,parallel                       # criterion benchmarks
 ```

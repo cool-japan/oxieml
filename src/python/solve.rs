@@ -96,15 +96,15 @@ pub fn solve_polynomial_complex_py(expr_str: &str, var: usize) -> PyResult<Vec<(
 /// tuple[str, list[list[float]]]
 ///     `(kind, solutions)`. `kind` is one of:
 ///
-///     * ``"unique"`` — a linear system with exactly one solution (one entry).
-///     * ``"nonlinear_solutions"`` — a nonlinear polynomial system with finitely
-///       many solutions; the **real** ones are listed. An empty list means every
-///       solution is complex.
-///     * ``"inconsistent"`` — no solution exists at all.
-///     * ``"underdetermined"`` — infinitely many solutions.
-///     * ``"nonlinear"`` — not handled: a transcendental system, a variable
-///       outside `vars`, or a Gröbner run that hit a resource cap. **No solutions
-///       are ever guessed in this case.**
+/// * ``"unique"`` — a linear system with exactly one solution (one entry).
+/// * ``"nonlinear_solutions"`` — a nonlinear polynomial system with finitely
+///   many solutions; the **real** ones are listed. An empty list means every
+///   solution is complex.
+/// * ``"inconsistent"`` — no solution exists at all.
+/// * ``"underdetermined"`` — infinitely many solutions.
+/// * ``"nonlinear"`` — not handled: a transcendental system, a variable
+///   outside `vars`, or a Gröbner run that hit a resource cap. **No solutions
+///   are ever guessed in this case.**
 #[pyfunction]
 pub fn solve_system_py(
     expr_strs: Vec<String>,

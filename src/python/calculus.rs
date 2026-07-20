@@ -11,7 +11,8 @@ fn map_err(e: impl std::fmt::Display) -> PyErr {
 /// Parameters
 /// ----------
 /// expr_str : str
-///     Expression string (e.g. `"x^2"`, `"sin(x)"`).
+///     Expression string in EML notation (e.g. `"x0"` for the variable x0,
+///     or `"E(x0,1)"` for exp(x0)).
 /// var : int
 ///     Variable index (0-based) to integrate over.
 /// lo : float

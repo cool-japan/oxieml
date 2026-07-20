@@ -38,6 +38,7 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_precision_loss)]
 
+pub mod assumptions;
 pub mod autodiff;
 pub mod canonical;
 pub mod compile;
@@ -54,6 +55,7 @@ pub mod lower_cse;
 pub mod lower_grad;
 pub mod lower_interval;
 pub mod lower_simplify;
+pub mod lower_simplify_identities;
 pub mod lower_units;
 pub mod matrix;
 pub mod named_const;
@@ -96,6 +98,7 @@ pub mod wasm;
 pub mod jit;
 
 // Re-exports for convenience
+pub use assumptions::{Assumptions, VarAssumption};
 pub use canonical::Canonical;
 pub use error::EmlError;
 pub use eval::EvalCtx;
@@ -103,6 +106,7 @@ pub use integrate::IntegrateResult;
 pub use limit::{LimitPoint, LimitResult};
 pub use lower::LoweredOp;
 pub use lower_interval::IntervalLO;
+pub use lower_simplify_identities::RewriteFlags;
 pub use matrix::{
     Assumption, Certainty, Certified, CharPoly, Eigenpair, Matrix, MatrixError, Rref, VerifyReport,
     ZeroOracle, ZeroVerdict,

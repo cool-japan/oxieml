@@ -1,21 +1,9 @@
-//! WebAssembly bindings for OxiEML via wasm-bindgen.
-//!
-//! # JavaScript usage
-//! ```javascript
-//! import init, { WasmSymRegConfig, WasmSymRegEngine } from './oxieml_wasm.js';
-//! await init();
-//! const config = WasmSymRegConfig.quick();
-//! config.max_depth = 2;
-//! const engine = new WasmSymRegEngine(config);
-//! // X: flat row-major array [x00, x01, ..., xij] for n_samples × n_features
-//! // y: flat array [y0, y1, ..., yn]
-//! const formulas = engine.discover(X_flat, y_flat, n_samples, n_features);
-//! for (const f of formulas) {
-//!     console.log(f.pretty, f.mse);
-//! }
-//! ```
+//! WASM bindings for symbolic regression: config, engine, and discovered/ranked
+//! formulas.
 
 use wasm_bindgen::prelude::*;
+
+use super::js_err;
 
 // --- WasmSymRegConfig ---
 
@@ -170,6 +158,55 @@ impl WasmDiscoveredFormula {
     }
 }
 
+// --- WasmRankedFormula ---
+
+/// A formula annotated with its NSGA-II non-domination rank and crowding
+/// distance, exposed to JavaScript.
+///
+/// Wraps [`crate::RankedFormula`].
+#[wasm_bindgen]
+pub struct WasmRankedFormula {
+    inner: crate::RankedFormula,
+}
+
+#[wasm_bindgen]
+impl WasmRankedFormula {
+    /// Human-readable expression string.
+    #[wasm_bindgen(getter)]
+    pub fn pretty(&self) -> String {
+        self.inner.formula.pretty.clone()
+    }
+
+    /// Final mean squared error on the training data.
+    #[wasm_bindgen(getter)]
+    pub fn mse(&self) -> f64 {
+        self.inner.formula.mse
+    }
+
+    /// Tree node count used as a complexity measure.
+    #[wasm_bindgen(getter)]
+    pub fn complexity(&self) -> usize {
+        self.inner.formula.complexity
+    }
+
+    /// Non-domination rank (`0` = Pareto front).
+    #[wasm_bindgen(getter)]
+    pub fn rank(&self) -> usize {
+        self.inner.rank
+    }
+
+    /// Crowding distance within the formula's own front (may be `+Infinity`).
+    #[wasm_bindgen(getter)]
+    pub fn crowding(&self) -> f64 {
+        self.inner.crowding
+    }
+
+    /// Render the formula as a LaTeX math expression.
+    pub fn to_latex(&self) -> String {
+        self.inner.formula.eml_tree.lower().simplify().to_latex()
+    }
+}
+
 // --- WasmSymRegEngine ---
 
 /// Symbolic regression engine exposed to JavaScript.
@@ -209,33 +246,12 @@ impl WasmSymRegEngine {
         n_samples: usize,
         n_features: usize,
     ) -> Result<Vec<WasmDiscoveredFormula>, JsValue> {
-        if x_flat.len() != n_samples * n_features {
-            return Err(JsValue::from_str(&format!(
-                "x_flat.len()={} but n_samples*n_features={}",
-                x_flat.len(),
-                n_samples * n_features
-            )));
-        }
-        if y_flat.len() != n_samples {
-            return Err(JsValue::from_str(&format!(
-                "y_flat.len()={} but n_samples={}",
-                y_flat.len(),
-                n_samples
-            )));
-        }
-
-        // Convert row-major flat array to Vec<Vec<f64>> where each inner Vec
-        // is one sample's features — matching the `discover(inputs, targets, num_vars)`
-        // signature of `SymRegEngine`.
-        let inputs: Vec<Vec<f64>> = (0..n_samples)
-            .map(|i| x_flat[i * n_features..(i + 1) * n_features].to_vec())
-            .collect();
-        let targets: Vec<f64> = y_flat.to_vec();
+        let (inputs, targets) = flatten_xy(x_flat, y_flat, n_samples, n_features)?;
 
         let engine = crate::symreg::SymRegEngine::new(self.config.clone());
         engine
             .discover(&inputs, &targets, n_features)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+            .map_err(js_err)
             .map(|mut formulas| {
                 formulas.truncate(self.max_formulas);
                 formulas
@@ -244,62 +260,68 @@ impl WasmSymRegEngine {
                     .collect()
             })
     }
+
+    /// Discover formulas via the full NSGA-II multi-objective (MSE,
+    /// complexity) search, returning the **whole final population** annotated
+    /// with `(rank, crowding)`; filter `rank === 0` for the Pareto front.
+    ///
+    /// `population`/`generations` configure the evolutionary loop (see
+    /// [`crate::Nsga2Config`]); the search-space shape still comes from this
+    /// engine's `config`.
+    pub fn discover_nsga2(
+        &self,
+        x_flat: &[f64],
+        y_flat: &[f64],
+        n_samples: usize,
+        n_features: usize,
+        population: usize,
+        generations: usize,
+    ) -> Result<Vec<WasmRankedFormula>, JsValue> {
+        let (inputs, targets) = flatten_xy(x_flat, y_flat, n_samples, n_features)?;
+
+        let nsga2_config = crate::Nsga2Config {
+            population,
+            generations,
+            ..crate::Nsga2Config::default()
+        };
+        let engine = crate::symreg::SymRegEngine::new(self.config.clone());
+        engine
+            .discover_nsga2(&inputs, &targets, n_features, &nsga2_config)
+            .map_err(js_err)
+            .map(|ranked| {
+                ranked
+                    .into_iter()
+                    .map(|f| WasmRankedFormula { inner: f })
+                    .collect()
+            })
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Free utility functions
-// ---------------------------------------------------------------------------
-
-/// Parse an expression string and evaluate it at the given variable values.
-///
-/// `vars` is a flat f64 slice where `vars[i]` is the value for variable `i`.
-#[wasm_bindgen]
-pub fn parse_and_eval(expr_str: &str, vars: &[f64]) -> Result<f64, JsValue> {
-    let tree = crate::parse(expr_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let lowered = tree.lower().simplify();
-    Ok(lowered.eval(vars))
-}
-
-/// Convert an expression string to a LaTeX representation.
-#[wasm_bindgen]
-pub fn to_latex_wasm(expr_str: &str) -> Result<String, JsValue> {
-    let tree = crate::parse(expr_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    Ok(tree.lower().simplify().to_latex())
-}
-
-/// Numerically evaluate a definite integral ∫_lo^hi f(x) dx.
-///
-/// `var` is the 0-based index of the integration variable.
-#[wasm_bindgen]
-pub fn integrate_definite_wasm(
-    expr_str: &str,
-    var: usize,
-    lo: f64,
-    hi: f64,
-) -> Result<f64, JsValue> {
-    let tree = crate::parse(expr_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let lowered = tree.lower().simplify();
-    let ctx = crate::EvalCtx::new(&[]);
-    lowered
-        .integrate_definite(var, lo, hi, &ctx)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
-}
-
-/// Find all symbolic solutions of `expr_str = 0` for the given variable.
-///
-/// Returns a JSON array of LaTeX strings, e.g. `["x","\\frac{1}{2}"]`.
-#[wasm_bindgen]
-pub fn solve_for_all_wasm(expr_str: &str, var: usize) -> Result<String, JsValue> {
-    let tree = crate::parse(expr_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let lowered = tree.lower().simplify();
-    let zero = crate::LoweredOp::Const(0.0);
-    let result = crate::solve_for_all(&lowered, &zero, var)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    // Manually build JSON (serde_json is not available in wasm feature).
-    let parts: Vec<String> = result
-        .roots
-        .iter()
-        .map(|r| format!("{:?}", r.to_latex()))
+/// Validate and convert a flat row-major `(x_flat, y_flat)` pair into the
+/// nested `Vec<Vec<f64>>` / `Vec<f64>` shape [`crate::symreg::SymRegEngine`]
+/// expects.
+fn flatten_xy(
+    x_flat: &[f64],
+    y_flat: &[f64],
+    n_samples: usize,
+    n_features: usize,
+) -> Result<(Vec<Vec<f64>>, Vec<f64>), JsValue> {
+    if x_flat.len() != n_samples * n_features {
+        return Err(js_err(format!(
+            "x_flat.len()={} but n_samples*n_features={}",
+            x_flat.len(),
+            n_samples * n_features
+        )));
+    }
+    if y_flat.len() != n_samples {
+        return Err(js_err(format!(
+            "y_flat.len()={} but n_samples={}",
+            y_flat.len(),
+            n_samples
+        )));
+    }
+    let inputs: Vec<Vec<f64>> = (0..n_samples)
+        .map(|i| x_flat[i * n_features..(i + 1) * n_features].to_vec())
         .collect();
-    Ok(format!("[{}]", parts.join(",")))
+    Ok((inputs, y_flat.to_vec()))
 }

@@ -36,6 +36,15 @@ pub fn digamma_py(x: f64) -> PyResult<f64> {
     Ok(crate::special::digamma(x))
 }
 
+/// Trigamma function ψ¹(x) = d²/dx² ln Γ(x).
+#[pyfunction]
+pub fn trigamma_py(x: f64) -> PyResult<f64> {
+    if x <= 0.0 && x == x.floor() {
+        return Err(map_err("trigamma undefined at non-positive integers"));
+    }
+    Ok(crate::special::trigamma(x))
+}
+
 /// Exponential integral Ei(x).
 #[pyfunction]
 pub fn ei_py(x: f64) -> f64 {

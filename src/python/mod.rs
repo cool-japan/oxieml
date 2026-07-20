@@ -22,10 +22,19 @@
 //!     print(f.pretty, f.mse)
 //! ```
 
+pub mod algebra;
 pub mod calculus;
+pub mod discovery;
+#[cfg(feature = "jit")]
+pub mod jit;
 pub mod numeric;
+pub mod pareto;
+#[cfg(feature = "smt")]
+pub mod smt;
 pub mod solve;
 pub mod symreg;
+pub mod units;
+pub mod verified;
 
 pub use symreg::PyDiscoveredFormula;
 pub use symreg::PySymRegEngine;
@@ -207,6 +216,7 @@ pub fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(numeric::erfc_py, m)?)?;
     m.add_function(wrap_pyfunction!(numeric::lgamma_py, m)?)?;
     m.add_function(wrap_pyfunction!(numeric::digamma_py, m)?)?;
+    m.add_function(wrap_pyfunction!(numeric::trigamma_py, m)?)?;
     m.add_function(wrap_pyfunction!(numeric::ei_py, m)?)?;
     m.add_function(wrap_pyfunction!(numeric::si_py, m)?)?;
     m.add_function(wrap_pyfunction!(numeric::ci_py, m)?)?;
@@ -215,6 +225,54 @@ pub fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // ODE solving
     m.add_function(wrap_pyfunction!(symreg::dsolve_py, m)?)?;
+
+    // Algebra: P2 rewrite rules, summation, symbolic matrices
+    m.add_function(wrap_pyfunction!(algebra::expand_py, m)?)?;
+    m.add_function(wrap_pyfunction!(algebra::factor_py, m)?)?;
+    m.add_function(wrap_pyfunction!(algebra::collect_py, m)?)?;
+    m.add_function(wrap_pyfunction!(algebra::apart_py, m)?)?;
+    m.add_function(wrap_pyfunction!(algebra::together_py, m)?)?;
+    m.add_function(wrap_pyfunction!(algebra::powsimp_py, m)?)?;
+    m.add_function(wrap_pyfunction!(algebra::logcombine_py, m)?)?;
+    m.add_function(wrap_pyfunction!(algebra::sum_indefinite_py, m)?)?;
+    m.add_function(wrap_pyfunction!(algebra::sum_definite_py, m)?)?;
+    m.add_class::<algebra::PyMatrix>()?;
+
+    // Discovery: NSGA-II, SINDy, 1-D PDE
+    m.add_class::<discovery::PyNsga2Config>()?;
+    m.add_class::<discovery::PyRankedFormula>()?;
+    m.add_function(wrap_pyfunction!(discovery::discover_nsga2_py, m)?)?;
+    m.add_function(wrap_pyfunction!(discovery::discover_sindy_py, m)?)?;
+    m.add_function(wrap_pyfunction!(discovery::discover_pde_py, m)?)?;
+
+    // Pareto-front extraction
+    m.add_function(wrap_pyfunction!(pareto::discover_pareto_py, m)?)?;
+    m.add_function(wrap_pyfunction!(pareto::pareto_front_py, m)?)?;
+
+    // Dimensional (units) analysis
+    m.add_function(wrap_pyfunction!(units::check_units_py, m)?)?;
+
+    // Verified (interval-certified) root finding and quadrature
+    m.add_class::<verified::PyRootCertificate>()?;
+    m.add_function(wrap_pyfunction!(verified::find_root_verified_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        verified::integrate_definite_verified_py,
+        m
+    )?)?;
+
+    // JIT batch evaluation (requires the `jit` feature)
+    #[cfg(feature = "jit")]
+    {
+        m.add_class::<jit::PyJitFn>()?;
+    }
+
+    // SMT solving (requires the `smt` feature)
+    #[cfg(feature = "smt")]
+    {
+        m.add_class::<smt::PyIncrementalSolver>()?;
+        m.add_function(wrap_pyfunction!(smt::max_smt_py, m)?)?;
+        m.add_function(wrap_pyfunction!(smt::minimize_unsat_core_py, m)?)?;
+    }
 
     Ok(())
 }

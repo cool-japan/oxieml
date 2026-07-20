@@ -31,18 +31,40 @@
 //!
 //! [`logcombine_tree`] and [`powsimp_tree`] are the raw, verification-free
 //! rewrite passes; the public [`LoweredOp::logcombine`] / [`LoweredOp::powsimp`]
-//! methods simply wrap them with the numeric-verification gate. A future item
-//! (P3: trig/exp-log simplify identities) is intended to reuse these passes and
-//! to add their inverses here — `logexpand` (`ln(a·b) → ln a + ln b`) and
-//! `expexpand`/`expcombine` (`exp(a+b) ↔ exp a · exp b`) — so all four
-//! log/exp combine-and-split directions live behind one module boundary.
+//! methods simply wrap them with the numeric-verification gate.
+//!
+//! The P3 trig/exp-log simplify work (see [`crate::lower_simplify_identities`])
+//! adds the three *inverse / companion* directions here so all four
+//! log/exp combine-and-split directions live behind one module boundary:
+//!
+//! | function              | rewrite                                   | branch validity      |
+//! |-----------------------|-------------------------------------------|----------------------|
+//! | [`logexpand_tree`]    | `ln(a·b) → ln a + ln b`, `ln(aᶜ) → c·ln a` | positive branch      |
+//! | [`expcombine_tree`]   | `exp a · exp b → exp(a+b)`                 | all of ℝ             |
+//! | [`expexpand_tree`]    | `exp(a+b) → exp a · exp b`                 | all of ℝ             |
+//!
+//! Each `*_tree` pass is a raw structural rewrite; the public
+//! [`LoweredOp::logexpand`] / [`LoweredOp::expcombine`] / [`LoweredOp::expexpand`]
+//! wrappers add the same numeric-verification gate the combine passes use, and
+//! [`crate::lower_simplify_identities`] calls the `*_tree` passes directly under
+//! its opt-in [`RewriteFlags`](crate::lower_simplify_identities::RewriteFlags).
 
 use std::sync::Arc;
 
 use crate::lower::LoweredOp;
 use crate::lower_simplify::ops_struct_hash;
 
-use super::{ladd, lconst, lln, lmul, lpow, verify_agrees};
+use super::{ladd, lconst, ldiv, lln, lmul, lpow, verify_agrees};
+
+/// `exp(arg)`.
+fn lexp(arg: LoweredOp) -> LoweredOp {
+    LoweredOp::Exp(Arc::new(arg))
+}
+
+/// `a − b`.
+fn lsub(a: LoweredOp, b: LoweredOp) -> LoweredOp {
+    LoweredOp::Sub(Arc::new(a), Arc::new(b))
+}
 
 impl LoweredOp {
     /// Combine powers of a common base (`xᵃ·xᵇ → xᵃ⁺ᵇ`).
@@ -93,6 +115,100 @@ impl LoweredOp {
     #[must_use]
     pub fn logcombine(&self) -> LoweredOp {
         let result = logcombine_tree(self);
+        if verify_agrees(self, &result, self.count_vars()) {
+            result
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Split a logarithm of a product/quotient/power into a sum
+    /// (`ln(a·b) → ln a + ln b`, `ln(aᶜ) → c·ln a`).
+    ///
+    /// This is the inverse of [`logcombine`](Self::logcombine). It is valid on
+    /// the positive branch (`a, b > 0`), which is exactly the domain covered by
+    /// the strictly-positive probe points of the verification gate; on the rare
+    /// sample where an argument is non-positive the gate skips that point.
+    /// Returns the input unchanged when the gate fails. Never panics.
+    ///
+    /// ```
+    /// use oxieml::LoweredOp;
+    /// use std::sync::Arc;
+    /// // ln(x·y) → ln x + ln y
+    /// let expr = LoweredOp::Ln(Arc::new(LoweredOp::Mul(
+    ///     Arc::new(LoweredOp::Var(0)),
+    ///     Arc::new(LoweredOp::Var(1)),
+    /// )));
+    /// let expanded = expr.logexpand();
+    /// for (xv, yv) in [(1.5_f64, 2.0_f64), (0.5, 3.0)] {
+    ///     let want = (xv * yv).ln();
+    ///     assert!((expanded.eval(&[xv, yv]) - want).abs() < 1e-9);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn logexpand(&self) -> LoweredOp {
+        let result = logexpand_tree(self);
+        if verify_agrees(self, &result, self.count_vars()) {
+            result
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Merge a product/quotient of exponentials into a single exponential
+    /// (`exp a · exp b → exp(a+b)`, `exp a / exp b → exp(a−b)`).
+    ///
+    /// Valid on the whole real line. Returns the input unchanged when the
+    /// numeric-verification gate fails. Never panics.
+    ///
+    /// ```
+    /// use oxieml::LoweredOp;
+    /// use std::sync::Arc;
+    /// // exp(x)·exp(y) → exp(x+y)
+    /// let expr = LoweredOp::Mul(
+    ///     Arc::new(LoweredOp::Exp(Arc::new(LoweredOp::Var(0)))),
+    ///     Arc::new(LoweredOp::Exp(Arc::new(LoweredOp::Var(1)))),
+    /// );
+    /// let combined = expr.expcombine();
+    /// for (xv, yv) in [(0.5_f64, 1.0_f64), (-0.5, 0.75)] {
+    ///     let want = (xv + yv).exp();
+    ///     assert!((combined.eval(&[xv, yv]) - want).abs() < 1e-9);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn expcombine(&self) -> LoweredOp {
+        let result = expcombine_tree(self);
+        if verify_agrees(self, &result, self.count_vars()) {
+            result
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Split an exponential of a sum/difference into a product/quotient
+    /// (`exp(a+b) → exp a · exp b`, `exp(a−b) → exp a / exp b`).
+    ///
+    /// This is the inverse of [`expcombine`](Self::expcombine) and is valid on
+    /// the whole real line. Returns the input unchanged when the gate fails.
+    /// Never panics.
+    ///
+    /// ```
+    /// use oxieml::LoweredOp;
+    /// use std::sync::Arc;
+    /// // exp(x+y) → exp x · exp y
+    /// let expr = LoweredOp::Exp(Arc::new(LoweredOp::Add(
+    ///     Arc::new(LoweredOp::Var(0)),
+    ///     Arc::new(LoweredOp::Var(1)),
+    /// )));
+    /// let expanded = expr.expexpand();
+    /// for (xv, yv) in [(0.5_f64, 1.0_f64), (-0.5, 0.75)] {
+    ///     let want = (xv + yv).exp();
+    ///     assert!((expanded.eval(&[xv, yv]) - want).abs() < 1e-9);
+    /// }
+    /// ```
+    #[must_use]
+    pub fn expexpand(&self) -> LoweredOp {
+        let result = expexpand_tree(self);
         if verify_agrees(self, &result, self.count_vars()) {
             result
         } else {
@@ -281,6 +397,123 @@ fn as_log_term(op: &LoweredOp) -> Option<(f64, LoweredOp)> {
     }
 }
 
+// ── logexpand core ─────────────────────────────────────────────────────────────
+
+/// Raw logarithm-splitting pass (no verification gate): the inverse of
+/// [`logcombine_tree`]. See [`LoweredOp::logexpand`].
+///
+/// Applies, recursively and where the shape matches,
+///
+/// ```text
+/// ln(a·b) → ln a + ln b ,   ln(a/b) → ln a − ln b ,   ln(aᶜ) → c·ln a .
+/// ```
+///
+/// These are the logarithm laws `ln(uv)=ln u+ln v`, valid on the positive
+/// branch `u, v > 0`. The caller's verification gate re-checks the value at
+/// strictly-positive probe points, so the positive-branch restriction is exactly
+/// the domain that is validated; a non-positive sample is skipped rather than
+/// wrongly accepted.
+pub(crate) fn logexpand_tree(op: &LoweredOp) -> LoweredOp {
+    match op {
+        LoweredOp::Ln(arg) => {
+            // Expand the argument first so nested products are fully split.
+            let inner = logexpand_tree(arg);
+            match &inner {
+                // ln(a·b) = ln a + ln b
+                LoweredOp::Mul(a, b) => ladd(
+                    logexpand_tree(&lln((**a).clone())),
+                    logexpand_tree(&lln((**b).clone())),
+                ),
+                // ln(a/b) = ln a − ln b
+                LoweredOp::Div(a, b) => lsub(
+                    logexpand_tree(&lln((**a).clone())),
+                    logexpand_tree(&lln((**b).clone())),
+                ),
+                // ln(aᶜ) = c·ln a  (valid for a > 0 and any real c)
+                LoweredOp::Pow(base, exp) => {
+                    lmul((**exp).clone(), logexpand_tree(&lln((**base).clone())))
+                }
+                _ => lln(inner),
+            }
+        }
+        _ => map_children(op, &logexpand_tree),
+    }
+}
+
+// ── expcombine / expexpand core ────────────────────────────────────────────────
+
+/// Raw exponential-combination pass (no verification gate). See
+/// [`LoweredOp::expcombine`].
+///
+/// Applies, recursively,
+///
+/// ```text
+/// exp a · exp b → exp(a+b) ,   exp a / exp b → exp(a−b) ,   (exp a)ᶜ → exp(a·c) .
+/// ```
+///
+/// Every one of these is an identity of `exp` on the whole real line
+/// (`exp(u)·exp(v) = exp(u+v)` for all real `u, v`), so no branch restriction is
+/// needed.
+pub(crate) fn expcombine_tree(op: &LoweredOp) -> LoweredOp {
+    match op {
+        LoweredOp::Mul(a, b) => {
+            let ea = expcombine_tree(a);
+            let eb = expcombine_tree(b);
+            if let (LoweredOp::Exp(x), LoweredOp::Exp(y)) = (&ea, &eb) {
+                return lexp(ladd((**x).clone(), (**y).clone()));
+            }
+            lmul(ea, eb)
+        }
+        LoweredOp::Div(a, b) => {
+            let ea = expcombine_tree(a);
+            let eb = expcombine_tree(b);
+            if let (LoweredOp::Exp(x), LoweredOp::Exp(y)) = (&ea, &eb) {
+                return lexp(lsub((**x).clone(), (**y).clone()));
+            }
+            ldiv(ea, eb)
+        }
+        LoweredOp::Pow(base, exp) => {
+            let eb = expcombine_tree(base);
+            if let LoweredOp::Exp(x) = &eb {
+                // (exp x)ᶜ = exp(x·c)
+                return lexp(lmul((**x).clone(), expcombine_tree(exp)));
+            }
+            LoweredOp::Pow(Arc::new(eb), Arc::new(expcombine_tree(exp)))
+        }
+        _ => map_children(op, &expcombine_tree),
+    }
+}
+
+/// Raw exponential-splitting pass (no verification gate): the inverse of
+/// [`expcombine_tree`]. See [`LoweredOp::expexpand`].
+///
+/// Applies, recursively,
+///
+/// ```text
+/// exp(a+b) → exp a · exp b ,   exp(a−b) → exp a / exp b .
+/// ```
+///
+/// Both hold for all real arguments.
+pub(crate) fn expexpand_tree(op: &LoweredOp) -> LoweredOp {
+    match op {
+        LoweredOp::Exp(arg) => {
+            let inner = expexpand_tree(arg);
+            match &inner {
+                LoweredOp::Add(a, b) => lmul(
+                    expexpand_tree(&lexp((**a).clone())),
+                    expexpand_tree(&lexp((**b).clone())),
+                ),
+                LoweredOp::Sub(a, b) => ldiv(
+                    expexpand_tree(&lexp((**a).clone())),
+                    expexpand_tree(&lexp((**b).clone())),
+                ),
+                _ => lexp(inner),
+            }
+        }
+        _ => map_children(op, &expexpand_tree),
+    }
+}
+
 // ── Shared structural recursion ────────────────────────────────────────────────
 
 /// Rebuild `op` with `f` applied to every direct child (leaves are cloned).
@@ -438,6 +671,98 @@ mod tests {
         for (xv, yv) in [(2.0_f64, 3.0_f64), (1.1, 0.9)] {
             let want = xv.ln() + yv.ln() + xv;
             assert!((result.eval(&[xv, yv]) - want).abs() < 1e-9);
+        }
+    }
+
+    fn exp(a: LoweredOp) -> LoweredOp {
+        LoweredOp::Exp(Arc::new(a))
+    }
+    fn div(a: LoweredOp, b: LoweredOp) -> LoweredOp {
+        LoweredOp::Div(Arc::new(a), Arc::new(b))
+    }
+
+    #[test]
+    fn logexpand_splits_product() {
+        // ln(x·y) → ln x + ln y
+        let expr = ln(mul(x(), y()));
+        let result = expr.logexpand();
+        assert!(
+            matches!(&result, LoweredOp::Add(a, b)
+                if matches!(a.as_ref(), LoweredOp::Ln(_)) && matches!(b.as_ref(), LoweredOp::Ln(_))),
+            "expected ln x + ln y, got {result:?}"
+        );
+        for (xv, yv) in [(1.5_f64, 2.0_f64), (0.5, 3.0)] {
+            assert!((result.eval(&[xv, yv]) - (xv * yv).ln()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn logexpand_power_becomes_coefficient() {
+        // ln(x^3) → 3·ln x
+        let expr = ln(pow(x(), c(3.0)));
+        let result = expr.logexpand();
+        for xv in [0.5_f64, 1.5, 2.0] {
+            assert!((result.eval(&[xv]) - xv.powi(3).ln()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn logexpand_inverts_logcombine() {
+        // logexpand(logcombine(ln x + ln y)) is value-equivalent to ln x + ln y.
+        let expr = add(ln(x()), ln(y()));
+        let round = expr.logcombine().logexpand();
+        for (xv, yv) in [(1.5_f64, 2.0_f64), (0.5, 3.0)] {
+            let want = xv.ln() + yv.ln();
+            assert!((round.eval(&[xv, yv]) - want).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn expcombine_merges_product() {
+        // exp(x)·exp(y) → exp(x+y)
+        let expr = mul(exp(x()), exp(y()));
+        let result = expr.expcombine();
+        assert!(
+            matches!(&result, LoweredOp::Exp(inner) if matches!(inner.as_ref(), LoweredOp::Add(_, _))),
+            "expected exp(x+y), got {result:?}"
+        );
+        for (xv, yv) in [(0.5_f64, 1.0_f64), (-0.5, 0.75)] {
+            assert!((result.eval(&[xv, yv]) - (xv + yv).exp()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn expcombine_quotient_is_difference() {
+        // exp(x)/exp(y) → exp(x−y)
+        let expr = div(exp(x()), exp(y()));
+        let result = expr.expcombine();
+        for (xv, yv) in [(0.5_f64, 1.0_f64), (-0.5, 0.75)] {
+            assert!((result.eval(&[xv, yv]) - (xv - yv).exp()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn expexpand_splits_sum() {
+        // exp(x+y) → exp x · exp y
+        let expr = exp(add(x(), y()));
+        let result = expr.expexpand();
+        assert!(
+            matches!(&result, LoweredOp::Mul(a, b)
+                if matches!(a.as_ref(), LoweredOp::Exp(_)) && matches!(b.as_ref(), LoweredOp::Exp(_))),
+            "expected exp x · exp y, got {result:?}"
+        );
+        for (xv, yv) in [(0.5_f64, 1.0_f64), (-0.5, 0.75)] {
+            assert!((result.eval(&[xv, yv]) - (xv + yv).exp()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn expexpand_inverts_expcombine() {
+        let expr = mul(exp(x()), exp(y()));
+        let round = expr.expcombine().expexpand();
+        for (xv, yv) in [(0.5_f64, 1.0_f64), (-0.5, 0.75)] {
+            let want = xv.exp() * yv.exp();
+            assert!((round.eval(&[xv, yv]) - want).abs() < 1e-9);
         }
     }
 }

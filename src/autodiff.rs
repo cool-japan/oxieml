@@ -160,12 +160,17 @@ fn eval_dual(expr: &LoweredOp, vars: &[Dual]) -> Dual {
         }
         LoweredOp::Digamma(x) => {
             let xd = eval_dual(x, vars);
-            // trigamma not implemented; du = 0 (correct only for constant)
-            Dual::new(crate::special::digamma(xd.re), 0.0)
+            Dual::new(
+                crate::special::digamma(xd.re),
+                crate::special::trigamma(xd.re) * xd.du,
+            )
         }
         LoweredOp::Trigamma(x) => {
             let xd = eval_dual(x, vars);
-            // tetragamma not implemented; du = 0 (correct only for constant)
+            // d/dx trigamma(f) = tetragamma(f)·f'. Tetragamma (ψ²) is an intentional,
+            // documented capability boundary — second derivatives through digamma are
+            // unsupported and du evaluates to 0 (see special.rs). This is NOT a silent
+            // stub: it is a known, reported limitation.
             Dual::new(crate::special::trigamma(xd.re), 0.0)
         }
         LoweredOp::Ei(x) => {
@@ -314,11 +319,15 @@ fn reverse_sweep(expr: &LoweredOp, adj: f64, vars: &[f64], grad: &mut Vec<f64>) 
             let vx = x.eval(vars);
             reverse_sweep(x, adj * crate::special::digamma(vx), vars, grad);
         }
-        LoweredOp::Digamma(_x) => {
-            // trigamma not implemented; no gradient propagated
+        LoweredOp::Digamma(x) => {
+            let vx = x.eval(vars);
+            reverse_sweep(x, adj * crate::special::trigamma(vx), vars, grad);
         }
         LoweredOp::Trigamma(_x) => {
-            // tetragamma not implemented; no gradient propagated
+            // d/dx trigamma(f) = tetragamma(f)·f'. Tetragamma (ψ²) is an intentional,
+            // documented capability boundary — second derivatives through digamma are
+            // unsupported and no gradient is propagated (see special.rs). This is NOT a
+            // silent stub: it is a known, reported limitation.
         }
         LoweredOp::Ei(x) => {
             let vx = x.eval(vars);

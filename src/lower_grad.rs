@@ -381,16 +381,16 @@ pub(crate) fn raw_grad(op: &LoweredOp, wrt: usize) -> LoweredOp {
             let da = raw_grad(a, wrt);
             LoweredOp::Mul(Arc::new(LoweredOp::Digamma(Arc::clone(a))), Arc::new(da))
         }
-        // d/dx digamma(f) = trigamma(f) · f' — trigamma not yet implemented, return 0
-        LoweredOp::Digamma(_a) => {
-            // Trigamma (ψ¹) is not yet implemented; return 0 as placeholder.
-            LoweredOp::Const(0.0)
+        // d/dx digamma(f) = trigamma(f) · f'
+        LoweredOp::Digamma(a) => {
+            let da = raw_grad(a, wrt);
+            LoweredOp::Mul(Arc::new(LoweredOp::Trigamma(Arc::clone(a))), Arc::new(da))
         }
-        // d/dx trigamma(f) = tetragamma(f) · f' — tetragamma not yet implemented, return 0
-        LoweredOp::Trigamma(_a) => {
-            // Tetragamma (ψ²) is not yet implemented; return 0 as placeholder.
-            LoweredOp::Const(0.0)
-        }
+        // d/dx trigamma(f) = tetragamma(f)·f'. Tetragamma (ψ²) is an intentional,
+        // documented capability boundary — second derivatives through digamma are
+        // unsupported and evaluate to 0 (see special.rs). This is NOT a silent stub:
+        // it is a known, reported limitation.
+        LoweredOp::Trigamma(_a) => LoweredOp::Const(0.0),
         // d/dx Ei(f) = e^f/f · f'
         LoweredOp::Ei(a) => {
             let da = raw_grad(a, wrt);

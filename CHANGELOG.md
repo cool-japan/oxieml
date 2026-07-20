@@ -7,7 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.4] - Unreleased
 
-_No changes yet._
+### Added
+
+**Arbitrary-Precision Polynomial Backend (`src/poly/`)**
+
+- `Poly`/`MultiPoly` coefficients switched to `Coeff = num_rational::BigRational`; every polynomial operation (`add`/`sub`/`mul`/`pow`/`div_rem`/`gcd`/`resultant`/`discriminant`/`content`/`square_free`/`rational_roots`) is now exact for arbitrary-magnitude rational input and never returns `PolyError::CoeffOverflow`
+- `f64_to_ratio` rationalizes via continued-fraction search instead of a fixed denominator cap
+- `Poly::from_int_coeffs(&[i64])` / `Poly::from_ratios(Vec<BigRational>)` constructors
+
+**Modern Polynomial Factorization (`src/poly/modular.rs`, `src/poly/factor_zassenhaus.rs`, new)**
+
+- `Poly::factor()` now performs full irreducible factorization over ℚ at arbitrary degree (previously capped at degree ≤ 6 via Kronecker's method): prime selection, distinct-degree factorization, Cantor–Zassenhaus equal-degree splitting, multifactor Hensel lifting (quadratic Newton step with Bézout cofactors), and Mignotte-bound-guided Zassenhaus subset recombination
+- Correct on Swinnerton-Dyer polynomials, cyclotomics, and many-factor products the old Kronecker path could not handle
+
+**Gröbner Bases & Nonlinear System Solving (`src/poly/{monomial,groebner,solve_system}.rs`, new)**
+
+- `Monomial`/`MonOrder` (`Lex`, `GrLex`, `GrevLex`) and order-aware `leading_term`/`reduce`/`s_polynomial` on `MultiPoly`
+- `groebner_basis(&[MultiPoly], &GroebnerOpts)` — reduced Gröbner basis via Buchberger's algorithm with both standard pair-elimination criteria
+- `ideal_member(&MultiPoly, &[MultiPoly], &GroebnerOpts)` — ideal membership by reduction against a Gröbner basis
+- `solve_zero_dim` and a new `SystemSolveResult::NonlinearSolutions(Vec<Vec<LoweredOp>>)` variant — `solve_system_py`/`solve_linear_system` now return the real solutions of zero-dimensional **nonlinear** polynomial systems (e.g. `{x²+y²=1, x=y}`) via lex-order Gröbner elimination + back-substitution, instead of bailing out to `SystemSolveResult::Nonlinear`
+
+**Symbolic Linear Algebra (`src/matrix/`, new)**
+
+- `Matrix` over symbolic `LoweredOp` entries: Bareiss fraction-free exact determinant (`det`/`det_exact`), Faddeev–LeVerrier characteristic polynomial (`charpoly`/`charpoly_exact`, with determinant and inverse as by-products), `rref`, `nullspace`, `eigenvalues`/`eigenvectors`, symbolic `inverse`
+- Three-tier `ZeroOracle`/`ZeroVerdict` backing every symbolic zero-test the exact linear algebra depends on: structural simplification, then Schwartz–Zippel random-point probing, then an honest `ProbablyZero` verdict that is never silently treated as a proven zero
+- `*_certified` variants (`rref_certified`, `nullspace_certified`, `inverse_assuming_nonsingular`) report the assumptions made whenever the oracle could not prove a pivot nonzero
+
+**Symbolic Summation (`src/summation/`, new)**
+
+- `sum_indefinite(term, k)` / `sum_definite(term, k, lo, hi) -> SumResult` — closed forms for hypergeometric terms via full Gosper–Petkovšek decomposition (degree-bounded key polynomial through Gaussian elimination), Faulhaber's formula (Bernoulli numbers) for polynomial terms, and geometric/telescoping special cases
+- Honest `SumResult` variants for `NotHypergeometric`/`NotClosedForm` when Gosper's algorithm certifies no hypergeometric antidifference exists
+
+**Algebraic Rewriting (`src/rewrite/`, new)**
+
+- Seven never-panicking `LoweredOp` methods: `expand`, `factor`, `collect(var)`, `apart` (partial fractions), `together`, `powsimp`, `logcombine`
+- `apart`/`together` and `integrate`'s rational-function path now share one `partial_fractions` helper (relocated from `integrate.rs`) upgraded to use the new `Poly::factor`
+
+**Assumption-Gated Identity Simplification (`src/assumptions.rs`, new)**
+
+- `VarAssumption` (`positive`/`nonnegative`/`real`/`integer` flags, all default `false`) and `Assumptions` (per-variable map)
+- `LoweredOp::simplify_with(&Assumptions)` / `simplify_with_flags` — opt-in Pythagorean (`sin²+cos²→1`, `1+tan²→1/cos²`, `cosh²−sinh²→1`), double/half-angle, product-to-sum, and log/exp-combine identities, each numerically value-checked at probe points before being applied
+
+**Deeper Integration (`src/integrate_trig.rs`, new)**
+
+- Reduction formulas for `∫sinⁿx`, `∫cosⁿx`, `∫tanⁿx`, `∫secⁿx`, `∫sinᵐx cosⁿx`, `∫sin(ax)cos(bx)`
+- Weierstrass `t = tan(x/2)` substitution for general rational trig integrands `∫R(sin x, cos x) dx`, routed through the shared `partial_fractions` helper
+- By-parts solve-for-I now closes cyclic integrals such as `∫eˣsin x dx` instead of bailing out on cycle detection
+
+**Laurent Series & Indeterminate-Form Limits (`src/series_laurent.rs`, new)**
+
+- `laurent(wrt, center, order) -> Result<Series, EmlError>` — pole-order detection plus regular-part Taylor expansion, so expansion at a singular center no longer hard-errors; new `EmlError::BranchPoint`/`EmlError::EssentialSingularity` variants for genuine non-meromorphic singularities
+- `limit` gains indeterminate-form normalization (`0·∞`, `∞−∞`, `0⁰`, `1^∞`, `∞⁰`) and a series-based fallback ordered after L'Hôpital and before numeric probing
+
+**NSGA-II Multi-Objective Symbolic Regression (`src/symreg/nsga2.rs`, new)**
+
+- `SymRegEngine::discover_nsga2` — fast-nondominated-sort (O(MN²)) + crowding-distance + crowded-comparison (μ+λ) selection, returning the full ranked front annotated with rank and crowding distance, alongside the existing `discover_pareto`/`pareto_front`
+
+**JIT Batch/SIMD Evaluation (`src/jit.rs`)**
+
+- `JitFn::call_batch(rows, n_rows, stride, out)` compiles a single internal Cranelift loop per expression and evaluates all rows in one call instead of re-entering the JIT per row; `call_batch_parallel` splits the row range across the rayon pool
+- Scalar `call` is unchanged; transcendentals remain scalar host calls inside the loop body
+
+**Incremental SMT, MaxSMT & Unsat Cores (`src/smt/{incremental,maxsmt,core}.rs`, new)**
+
+- `IncrementalEmlSolver` keeps one live OxiZ `Solver`/`TermManager` alive across candidates, using `push`/`pop` instead of re-encoding and re-constructing a solver per check
+- `max_smt` — maximizes the number of satisfied soft constraints (RC2-based under the new `smt-opt` feature; pure greedy fallback under base `smt`)
+- `minimize_unsat_core` — a minimal infeasible subset of an `Unsat` constraint set
+
+**Python & WASM Bindings (`src/python/`, `src/wasm/`)**
+
+- New `src/python/{jit,smt,verified,units,pareto,discovery,algebra}.rs` extend the `oxieml._core` (ABI name preserved) surface to the round-4 API: symbolic `Matrix`, summation, algebraic rewriting, `discover_nsga2`/`Nsga2Config`, verified roots (`find_root_verified`, `integrate_definite_verified`), unit checking, JIT (`call`/`call_batch`/`call_batch_parallel`), and incremental/MaxSMT SMT
+- `src/python/solve.rs` gains `solve_system_py`, `groebner_basis_py`, `ideal_member_py`
+- Curated WASM subset (`src/wasm/{mod,algebra,symreg}.rs`): parse/eval, LaTeX, algebraic rewriting, summation, small symbolic matrices, definite integration, root solving, and `discover_nsga2`; JIT, SMT, PDE, and SINDy discovery are intentionally excluded from the WASM build (solver/codegen dependencies would bloat the bundle for capabilities a browser context does not need)
+
+**CLI Subcommands & REPL (`src/bin/oxieml/`)**
+
+- `oxieml` gains a clap-derived (`clap = "4"`, `derive`) subcommand interface: `eval, lower, grad, integrate, solve, simplify, symreg, smt (feature "smt"), series, limit, repl`
+- Default `repl` is an FFI-free loop over std stdin/stdout
+- The legacy single-dash-flag interface (`--lower`, `-g`/`--gen`, `-d`/`--grad`, `-l`/`--list`, `-s`/`--symreg`, bare expression, stdin, `--help`, `--version`) is preserved verbatim via a compatibility shim; the two syntaxes cannot collide because subcommands never start with `-`
+
+### Changed
+
+- **Parallel symbolic-regression search (`src/symreg/{mcts,evolution}.rs`)** — under `feature = "parallel"`, MCTS rollout simulation and intra-island GA fitness evaluation now run on the rayon pool (root-parallel chunked simulation with deterministic backprop order; two-phase map-then-merge for GA). With a fixed `config.seed`, output is bit-identical to the single-threaded path, and verified thread-count-invariant (`RAYON_NUM_THREADS=1` vs. `8`)
+- New Cargo features: `cli` (now in `default`, gates the `oxieml` binary target via `required-features`), `smt-opt` (`smt` + `oxiz/optimization`, enables RC2-based `max_smt`)
+- New required dependencies `num-bigint = "0.4"` and `num-integer = "0.1"` back the `BigRational` polynomial coefficient type; the pre-existing `num-rational` dependency gains the `num-bigint-std` feature. New optional dependency `clap = "4.6"` (feature `cli`)
+- Routine dependency bumps: `oxiz` 0.2.3 → 0.2.4, `scirs2-core` 0.5.0 → 0.6.1, `wasm-bindgen` 0.2.125 → 0.2.126, `cranelift-{codegen,frontend,jit,module}` 0.132.1 → 0.133.1
+
+### Fixed
+
+- **Digamma gradient (T3)** — d/dx digamma(f) previously returned 0 (a silent wrong gradient); now correctly evaluates to trigamma(f)·f' in symbolic grad, forward-mode (JVP), and reverse-mode (VJP) autodiff.
+- **`src/python/solve.rs` doc-comment doctest** — the new `solve_system_py` docstring's `kind`-value bullet list was indented four spaces past the `///` marker, which CommonMark parses as an indented code block rather than a list; `rustdoc` then tried to compile that block as a Rust doctest and failed. Reformatted to a properly-recognized Markdown list (one-space bullet, two-space continuation indent) so it renders as prose. All 29 doctests pass (`cargo test --doc --all-features`).
+- **Misleading EML-grammar examples in Python doc comments (discovered follow-up F2)** — `crate::parse` accepts only the crate's minimal grammar (the constant `1`, variables `x0`, `x1`, …, and `E(a,b)`/`eml(a,b)`); it does not accept infix `^`/`*`/`+` or named calls like `sin(x)`. `src/python/calculus.rs`'s `integrate_definite_py` doc comment showed the invalid examples `"x^2"`/`"sin(x)"`; replaced with valid EML strings (`"x0"`, `"E(x0,1)"`). `src/python/solve.rs` was audited too and contains no invalid grammar examples.
+
+### Notes
+
+- **`wasm32-unknown-unknown` target build is blocked** by a pre-existing `getrandom 0.4.3` requirement (the `wasm_js` backend feature is not enabled) that predates this round's WASM work and affects `master` generally; it stems from the still-open `rand → scirs2-core` migration noted below. All round-4 WASM/Python binding *source* compiles cleanly on the host and is clippy-clean — only the `wasm32` cross-target build is affected.
+- **REPL raw-mode line editing is deferred.** The default `repl` subcommand is a plain std-stdin read loop; richer (arrow-key/history) editing is planned behind a future opt-in `repl-rich` feature and is not implemented yet.
+- **`rand` is still used directly** in `src/symreg/*` (`discover`, `evolution`, `mcts`, `nsga2`, `optimize_lm`, `sindy`, `uncertainty`); migrating it to `scirs2-core`'s random-number facilities was deliberately deferred this cycle and remains open.
+- **Tetragamma (second-derivative-through-digamma) boundary remains open.** The first-order `d/dx digamma(f) = trigamma(f)·f′` gap is now closed (see `### Fixed`). Its second-order continuation, `d/dx trigamma(f) = tetragamma(f)·f′`, would require the tetragamma function (ψ²), which is intentionally not implemented: `LoweredOp::grad` (`src/lower_grad.rs`) and the forward/reverse autodiff sweeps (`src/autodiff.rs`) evaluate it to `0`/propagate no gradient by design. This is a documented capability limit, not a silent stub.
 
 ## [0.1.3] - 2026-06-25
 

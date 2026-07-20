@@ -203,7 +203,11 @@ fn substitute_atoms(template: &LoweredOp, base: usize, atoms: &[(u64, LoweredOp)
     }
 }
 
-const PROBE_POINTS: [f64; 5] = [0.7, 1.3, 2.1, -0.5, 0.3];
+/// Deterministic probe points shared by the simplifier's numeric-verification
+/// gate (and the assumption-gated identity layer in
+/// [`crate::lower_simplify_identities`]). The mix of positive and negative
+/// values makes any sign-dependent rewrite (e.g. `√(x²) → x`) detectable.
+pub(crate) const PROBE_POINTS: [f64; 5] = [0.7, 1.3, 2.1, -0.5, 0.3];
 const MAX_POLY_TERMS: usize = 50;
 
 pub(crate) fn canonicalize_poly(op: &LoweredOp) -> LoweredOp {
@@ -252,6 +256,55 @@ impl LoweredOp {
         let inner = self.simplify_inner();
         let canonical = canonicalize_poly(&inner);
         canonical.simplify_inner()
+    }
+
+    /// Simplify under a set of per-variable [`Assumptions`], enabling the
+    /// assumption-gated trigonometric/exp-log identity layer.
+    ///
+    /// This is a strict superset of [`simplify`](Self::simplify): it first runs
+    /// the identical base pipeline, then applies the *contracting* identities
+    /// that are always sound (Pythagorean collapses `sin²+cos² → 1`,
+    /// `cosh²−sinh² → 1`, `1+tan² → 1/cos²`) plus any identity unlocked by the
+    /// assumptions (e.g. `√(x²) → x` when `x` is asserted non-negative). Every
+    /// rewrite is numerically re-verified on the asserted domain, so the value
+    /// of the expression is preserved. Opt-in *expanding* identities are left
+    /// off; use [`simplify_with_flags`](Self::simplify_with_flags) to enable
+    /// them.
+    ///
+    /// ```
+    /// use oxieml::{Assumptions, LoweredOp};
+    /// use std::sync::Arc;
+    /// // sin²x + cos²x → 1
+    /// let x = Arc::new(LoweredOp::Var(0));
+    /// let s2 = LoweredOp::Pow(Arc::new(LoweredOp::Sin(Arc::clone(&x))), Arc::new(LoweredOp::Const(2.0)));
+    /// let c2 = LoweredOp::Pow(Arc::new(LoweredOp::Cos(Arc::clone(&x))), Arc::new(LoweredOp::Const(2.0)));
+    /// let expr = LoweredOp::Add(Arc::new(s2), Arc::new(c2));
+    /// assert_eq!(expr.simplify_with(&Assumptions::default()), LoweredOp::Const(1.0));
+    /// ```
+    #[must_use]
+    pub fn simplify_with(&self, assumptions: &crate::assumptions::Assumptions) -> Self {
+        crate::lower_simplify_identities::simplify_with_flags(
+            self,
+            assumptions,
+            crate::lower_simplify_identities::RewriteFlags::default(),
+        )
+    }
+
+    /// Simplify under [`Assumptions`] with explicit opt-in
+    /// [`RewriteFlags`](crate::lower_simplify_identities::RewriteFlags) selecting
+    /// which *expanding* identities (product-to-sum, double/half-angle,
+    /// log/exp expand/combine, `powsimp`) may fire in addition to the always-on
+    /// contracting layer.
+    ///
+    /// Every expanding rewrite is numerically verified before being kept, so the
+    /// value of the expression is always preserved.
+    #[must_use]
+    pub fn simplify_with_flags(
+        &self,
+        assumptions: &crate::assumptions::Assumptions,
+        flags: crate::lower_simplify_identities::RewriteFlags,
+    ) -> Self {
+        crate::lower_simplify_identities::simplify_with_flags(self, assumptions, flags)
     }
 
     fn simplify_inner(&self) -> Self {
