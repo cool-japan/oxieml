@@ -17,7 +17,7 @@ readme = "README.md"
 num-complex = "0.4"
 rand = "0.10"
 rayon = { version = "1.12", optional = true }
-oxiblas-core = { version = "0.2.1", optional = true, default-features = false, features = ["std"] }
+oxiblas-core = { version = "0.2.2", optional = true, default-features = false, features = ["std"] }
 oxiz = { version = "0.3.2", optional = true, default-features = false, features = ["std"] }
 # NOTE: pinned to the 0.4.x line (not the newer 0.5.x major published on crates.io)
 # on purpose: num-rational 0.4.2's `BigRational` alias and oxiz 0.2.3 both depend on
