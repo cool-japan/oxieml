@@ -410,20 +410,38 @@ impl SymRegConfig {
 }
 
 /// A formula discovered by symbolic regression.
+///
+/// Every field describes the *same* fitted model: [`Self::eml_tree`] carries
+/// the optimized parameters, so evaluating it (via [`EmlTree::eval_batch`],
+/// [`EmlTree::eval_real`], [`EmlTree::lower`], JIT/codegen, …) reproduces
+/// [`Self::mse`] over the training data, and [`Self::pretty`] /
+/// [`Self::to_latex`] render that same tree.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiscoveredFormula {
-    /// The EML tree representation.
+    /// The EML tree representation, **with the fitted parameters baked in**.
+    ///
+    /// Each parameter leaf of the searched topology has been replaced by
+    /// `EmlNode::Const(params[i])`, so the tree is self-contained: it can be
+    /// evaluated, lowered, compiled or serialized on its own and will agree
+    /// with [`Self::mse`]. It is therefore *not* a reusable search topology —
+    /// use [`enumerate_topologies`] for that.
     pub eml_tree: EmlTree,
-    /// Final mean squared error.
+    /// Final mean squared error of [`Self::eml_tree`] over the training data.
     pub mse: f64,
     /// Tree node count (complexity measure).
     pub complexity: usize,
     /// Combined score: MSE + complexity_penalty * complexity.
     pub score: f64,
-    /// Human-readable expression (from lowering).
+    /// Human-readable expression: [`Self::eml_tree`] lowered and simplified.
+    ///
+    /// With [`SymRegConfig::constant_extraction`] enabled, values that the
+    /// simplifier folded out of several parameters may additionally be
+    /// rendered with a symbolic name (`π`, `e`, …); such a rendering stays
+    /// within the configured `eps` of the tree it describes.
     pub pretty: String,
-    /// Optimized parameter values.
+    /// Optimized parameter values, in the left-to-right leaf order in which
+    /// they appear as `Const` leaves of [`Self::eml_tree`].
     pub params: Vec<f64>,
     /// Cross-validated MSE (average over held-out folds), or `None` when
     /// `SymRegConfig::cv_folds` was not set.

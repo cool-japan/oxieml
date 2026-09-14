@@ -10,51 +10,41 @@ use crate::named_const::NamedConst;
 use crate::tree::EmlTree;
 use std::sync::Arc;
 
+/// Bake learned parameters into a copy of the EML topology.
+///
+/// Replaces every parameter leaf (`One` and `Const`) with `Const(params[i])`,
+/// walking the tree in the *same* left-to-right leaf order that
+/// [`crate::grad::ParameterizedEmlTree`] uses when it assigns parameter
+/// indices (`build_tape_recursive` descends left, then right). The returned
+/// tree is therefore self-contained: evaluating it reproduces exactly the
+/// value the optimizer scored, which is what makes it suitable as
+/// [`crate::symreg::DiscoveredFormula::eml_tree`].
+///
+/// Leaves beyond `params` keep their own value, so a short `params` slice can
+/// never panic.
+pub(super) fn bake_params_into_tree(topology: &EmlTree, params: &[f64]) -> EmlTree {
+    if params.is_empty() {
+        return topology.clone();
+    }
+    let mut idx = 0usize;
+    EmlTree::from_node(substitute_params(&topology.root, params, &mut idx))
+}
+
 /// Bake learned parameters into a lowered operation tree.
 ///
-/// Walks the EML topology and the lowered op tree in tandem, substituting
-/// each `Const(1.0)` that originated from a `One` node with `Const(param[i])`.
-/// This produces a `LoweredOp` tree that reflects the actual values discovered
-/// by the Adam optimizer — suitable for pretty-printing and constants extraction.
+/// Substitutes the parameters into the EML tree *first* (see
+/// [`bake_params_into_tree`]) and lowers the result, so the lowered form
+/// describes the same function as the fitted tree.
 ///
-/// # Strategy
-///
-/// `lower_node` consumes `EmlNode::One` nodes in various patterns:
-/// - `eml(x, One)` → `Exp(x)` (the `One` is hidden inside the pattern)
-/// - `eml(One, One)` → `Const(e)` (both Ones collapsed to e)
-/// - etc.
-///
-/// Because patterns swallow `One` nodes before we can intercept them, this
-/// function uses a post-lowering substitution: it scans the resulting
-/// `LoweredOp` tree for `Const(1.0)` nodes and replaces them with the
-/// corresponding parameter value in post-order.
-///
-/// The substitution is best-effort: if the lowering collapsed several `One`
-/// nodes into a single constant (e.g., `Const(e)`), those values are not
-/// individually accessible. In that case, the `Const(e)` is left as-is.
-///
-/// This is adequate for the constants-extraction use-case, where we scan
-/// all `Const` positions regardless of their origin.
+/// The substitution has to happen before lowering because `lower_node`
+/// pattern-matches on `EmlNode::One` and swallows those leaves:
+/// `eml(x, One) → Exp(x)`, `eml(One, One) → Const(e)`, the `sin`/`cos`/`ln`
+/// canonical shapes, … A post-lowering substitution therefore loses the
+/// parameter entirely (`eml(x, One)` fitted with `p = 148.41` lowers to
+/// `exp(x)`, dropping the `- ln(148.41)` term) and misaligns every remaining
+/// parameter index.
 pub(super) fn bake_params_into_lowered(topology: &EmlTree, params: &[f64]) -> LoweredOp {
-    if params.is_empty() {
-        return topology.lower();
-    }
-
-    // If the topology has Const leaves, use the substitute-first approach which
-    // correctly handles both One and Const as parameters.
-    // When no Const leaves exist (the common case), use the legacy approach
-    // to preserve bit-identical behavior.
-    if topology.count_const_leaves() > 0 {
-        let mut idx = 0usize;
-        let new_root = substitute_params(&topology.root, params, &mut idx);
-        let new_tree = EmlTree::from_node(new_root);
-        return new_tree.lower();
-    }
-
-    // Legacy path: lower first, then substitute Const(1.0) with param values.
-    let lowered = topology.lower();
-    let mut param_idx = 0usize;
-    replace_const_one(&lowered, params, &mut param_idx)
+    bake_params_into_tree(topology, params).lower()
 }
 
 fn substitute_params(
@@ -80,63 +70,6 @@ fn substitute_params(
             let r = substitute_params(right, params, idx);
             std::sync::Arc::new(EmlNode::Eml { left: l, right: r })
         }
-    }
-}
-
-fn replace_const_one(op: &LoweredOp, params: &[f64], idx: &mut usize) -> LoweredOp {
-    match op {
-        LoweredOp::Const(c) if (*c - 1.0).abs() < 1e-15 => {
-            if *idx < params.len() {
-                let p = params[*idx];
-                *idx += 1;
-                LoweredOp::Const(p)
-            } else {
-                op.clone()
-            }
-        }
-        LoweredOp::Const(_) | LoweredOp::Var(_) | LoweredOp::NamedConst(_) => op.clone(),
-        LoweredOp::Neg(a) => LoweredOp::Neg(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Exp(a) => LoweredOp::Exp(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Ln(a) => LoweredOp::Ln(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Sin(a) => LoweredOp::Sin(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Cos(a) => LoweredOp::Cos(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Tan(a) => LoweredOp::Tan(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Sinh(a) => LoweredOp::Sinh(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Cosh(a) => LoweredOp::Cosh(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Tanh(a) => LoweredOp::Tanh(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Arcsin(a) => LoweredOp::Arcsin(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Arccos(a) => LoweredOp::Arccos(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Arctan(a) => LoweredOp::Arctan(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Arcsinh(a) => LoweredOp::Arcsinh(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Arccosh(a) => LoweredOp::Arccosh(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Arctanh(a) => LoweredOp::Arctanh(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Erf(a) => LoweredOp::Erf(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::LGamma(a) => LoweredOp::LGamma(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Digamma(a) => LoweredOp::Digamma(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Trigamma(a) => LoweredOp::Trigamma(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Ei(a) => LoweredOp::Ei(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Si(a) => LoweredOp::Si(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Ci(a) => LoweredOp::Ci(Arc::new(replace_const_one(a, params, idx))),
-        LoweredOp::Add(a, b) => LoweredOp::Add(
-            Arc::new(replace_const_one(a, params, idx)),
-            Arc::new(replace_const_one(b, params, idx)),
-        ),
-        LoweredOp::Sub(a, b) => LoweredOp::Sub(
-            Arc::new(replace_const_one(a, params, idx)),
-            Arc::new(replace_const_one(b, params, idx)),
-        ),
-        LoweredOp::Mul(a, b) => LoweredOp::Mul(
-            Arc::new(replace_const_one(a, params, idx)),
-            Arc::new(replace_const_one(b, params, idx)),
-        ),
-        LoweredOp::Div(a, b) => LoweredOp::Div(
-            Arc::new(replace_const_one(a, params, idx)),
-            Arc::new(replace_const_one(b, params, idx)),
-        ),
-        LoweredOp::Pow(a, b) => LoweredOp::Pow(
-            Arc::new(replace_const_one(a, params, idx)),
-            Arc::new(replace_const_one(b, params, idx)),
-        ),
     }
 }
 
@@ -493,6 +426,80 @@ pub(super) fn extract_named_constants(
 
         if let Some((new_tree, new_mse)) = best_candidate {
             current = new_tree;
+            current_mse = new_mse;
+        }
+    }
+
+    (current, current_mse)
+}
+
+/// Run greedy named-constants extraction on the *parameter vector*.
+///
+/// The counterpart of [`extract_named_constants`], one level down: instead of
+/// rewriting `Const` positions of a lowered op tree (which no longer map back
+/// onto the EML leaves once the simplifier has folded them), this walks the
+/// fitted parameters themselves. Each parameter is tried against every
+/// candidate constant under the same acceptance rule — the candidate must sit
+/// within 5% of the fitted value and must satisfy
+/// `new_mse ≤ (1 + eps) * current_mse` — and the best accepted candidate wins.
+///
+/// Working on the parameters is what lets an accepted substitution reach
+/// `DiscoveredFormula::params` and `::eml_tree`, so the returned formula and
+/// its reported MSE stay in agreement. MSE is measured with
+/// [`compute_mse_parameterized`], the same metric the optimizer scored with.
+///
+/// Returns the (possibly snapped) parameters and their MSE.
+pub(super) fn extract_named_constants_params(
+    topology: &EmlTree,
+    params: &[f64],
+    initial_mse: f64,
+    eps: f64,
+    inputs: &[Vec<f64>],
+    targets: &[f64],
+) -> (Vec<f64>, f64) {
+    use super::topology::compute_mse_parameterized;
+    use crate::grad::ParameterizedEmlTree;
+
+    let candidates = named_const_candidates();
+    let mut current: Vec<f64> = params.to_vec();
+    let mut current_mse = initial_mse;
+
+    let mut probe = ParameterizedEmlTree::from_topology(topology, 1.0);
+    if probe.num_params() != current.len() {
+        // Parameter count disagrees with the topology (should not happen);
+        // leave the fit untouched rather than silently mis-assigning values.
+        return (current, current_mse);
+    }
+
+    for param_idx in 0..current.len() {
+        let orig_val = current[param_idx];
+        let mut best_candidate: Option<(f64, f64)> = None;
+
+        for (cand_val, _) in &candidates {
+            // Only snap to a constant that is genuinely close to the fitted
+            // value (within 5%) — mirrors `extract_named_constants`.
+            if (cand_val - orig_val).abs() > 0.05 * orig_val.abs().max(1e-12) {
+                continue;
+            }
+            probe.params.clone_from_slice(&current);
+            probe.params[param_idx] = *cand_val;
+            let Some(new_mse) = compute_mse_parameterized(&probe, inputs, targets) else {
+                continue;
+            };
+            if new_mse > (1.0 + eps) * current_mse {
+                continue;
+            }
+            let accept = match best_candidate {
+                None => true,
+                Some((_, prev_mse)) => new_mse < prev_mse,
+            };
+            if accept {
+                best_candidate = Some((*cand_val, new_mse));
+            }
+        }
+
+        if let Some((cand_val, new_mse)) = best_candidate {
+            current[param_idx] = cand_val;
             current_mse = new_mse;
         }
     }

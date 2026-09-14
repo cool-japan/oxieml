@@ -318,7 +318,7 @@ pub(super) fn optimize_topology_lm(
 
     let complexity = topology.size();
 
-    let (final_op, final_mse) = try_extract_named_constants(
+    let (final_op, final_params, final_mse) = try_extract_named_constants(
         topology,
         &best_params,
         best_mse,
@@ -328,15 +328,17 @@ pub(super) fn optimize_topology_lm(
     );
 
     let pretty = final_op.to_pretty();
-    let (aic, bic) = compute_aic_bic(final_mse, inputs.len(), best_params.len());
+    let (aic, bic) = compute_aic_bic(final_mse, inputs.len(), final_params.len());
 
     Some(DiscoveredFormula {
-        eml_tree: topology.clone(),
+        // Same as the Adam path: the returned tree must carry the fitted
+        // parameters, not the bare topology (issue #2).
+        eml_tree: super::constants::bake_params_into_tree(topology, &final_params),
         mse: final_mse,
         complexity,
         score: final_mse + config.complexity_penalty * complexity as f64,
         pretty,
-        params: best_params,
+        params: final_params,
         cv_mse: None,
         aic,
         bic,
